@@ -14,6 +14,7 @@
     "preflight": ".venv\\Scripts\\python.exe scripts/hardware_preflight.py",
     "health": "powershell -ExecutionPolicy Bypass -File scripts/health_check.ps1",
     "sql:smoke": "powershell -ExecutionPolicy Bypass -File scripts/run_sqlserver_live_smoke_desktop.ps1",
+    "sql:browser-smoke": ".venv\\Scripts\\python.exe scripts/browser_activity_live_smoke.py",
     "sql:backup": "powershell -ExecutionPolicy Bypass -File scripts/backup_sqlserver.ps1"
   }
 }

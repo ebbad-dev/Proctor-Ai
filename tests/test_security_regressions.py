@@ -18,6 +18,7 @@ from core.security import (
     verify_password,
 )
 from infrastructure.api import fastapi_app as api
+from database.student_repository import StudentRepository
 from scripts.prepare_e2e_seed import rotate_existing_user
 
 
@@ -50,6 +51,75 @@ class E2ECredentialRotationTests(unittest.TestCase):
 
         self.assertFalse(rotated)
         self.assertIsNone(repo.updated)
+
+
+class BrowserActivityPersistenceTests(unittest.TestCase):
+    class FakeDatabase:
+        def __init__(self) -> None:
+            self.executed: tuple[str, tuple] | None = None
+            self.rows: list[dict] = []
+
+        def execute(self, sql: str, params: tuple = ()) -> int:
+            self.executed = (sql, params)
+            return 1
+
+        def query(self, _sql: str, _params: tuple = ()) -> list[dict]:
+            return self.rows
+
+    def test_repository_persists_full_browser_activity(self) -> None:
+        db = self.FakeDatabase()
+        repo = StudentRepository(db)
+
+        repo.insert_browser_activity(
+            "session_1",
+            "tab_switch",
+            "2026-07-16T10:00:00Z",
+            url="https://example.test/answer",
+            title="Example Answer",
+            category="Search",
+            risk_level="high",
+            risk_points=10,
+            source="browser_guard_extension",
+            tenant_id="tenant_1",
+        )
+
+        self.assertIsNotNone(db.executed)
+        self.assertIn("INSERT INTO BrowserActivity", db.executed[0])
+        self.assertEqual(db.executed[1][0:3], ("tenant_1", "session_1", "tab_switch"))
+        self.assertIn("https://example.test/answer", db.executed[1])
+        self.assertIn("browser_guard_extension", db.executed[1])
+
+    def test_repeated_activity_is_deduplicated_only_when_nearby(self) -> None:
+        existing = [{
+            "type": "tab_switch",
+            "url": "https://example.test",
+            "title": "Example",
+            "timestamp": "2026-07-16T10:00:00Z",
+        }]
+        nearby = {**existing[0], "timestamp": "2026-07-16T10:00:01Z"}
+        later = {**existing[0], "timestamp": "2026-07-16T10:05:00Z"}
+
+        self.assertTrue(api._has_near_browser_row(existing, nearby))
+        self.assertFalse(api._has_near_browser_row(existing, later))
+
+    def test_persisted_row_normalizes_for_the_api(self) -> None:
+        row = api._normalize_browser_activity({
+            "activity_id": 7,
+            "session_id": "session_1",
+            "activity_type": "devtools",
+            "url": "https://example.test",
+            "title": "Developer tools",
+            "category": "DevTools",
+            "risk_level": "high",
+            "risk_points": 12,
+            "source": "browser_guard_extension",
+            "event_time": "2026-07-16T10:00:00Z",
+        })
+
+        self.assertEqual(row["type"], "devtools")
+        self.assertEqual(row["risk_impact"], 12)
+        self.assertEqual(row["source"], "browser_guard_extension")
+        self.assertEqual(row["time"], "10:00:00")
 
 
 class AnswerPrivacyTests(unittest.TestCase):

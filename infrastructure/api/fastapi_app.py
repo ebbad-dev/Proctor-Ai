@@ -203,6 +203,7 @@ if _FASTAPI_AVAILABLE:
         risk: str
         risk_points: Optional[int] = None
         risk_impact: Optional[int] = None
+        source: Optional[str] = None
         time: str
         timestamp: str
 
@@ -1845,6 +1846,24 @@ if _FASTAPI_AVAILABLE:
             return "medium"
         return "low"
 
+    def _normalize_browser_activity(row: dict) -> dict:
+        timestamp = _iso(row.get("event_time") or row.get("timestamp"))
+        points = int(row.get("risk_points") or row.get("risk_impact") or 0)
+        return {
+            "activity_id": row.get("activity_id"),
+            "session_id": str(row.get("session_id") or ""),
+            "type": str(row.get("activity_type") or row.get("type") or "browser"),
+            "url": str(row.get("url") or ""),
+            "title": str(row.get("title") or ""),
+            "category": str(row.get("category") or "Unknown"),
+            "risk": str(row.get("risk_level") or row.get("risk") or _browser_risk_label(points)),
+            "risk_points": points,
+            "risk_impact": points,
+            "source": str(row.get("source") or ""),
+            "time": timestamp[11:19] if len(timestamp) >= 19 else timestamp,
+            "timestamp": timestamp,
+        }
+
     def _browser_activity_from_event(row: dict) -> Optional[dict]:
         event_type = row.get("event_type", "")
         notes = row.get("notes", "")
@@ -1896,14 +1915,37 @@ if _FASTAPI_AVAILABLE:
             if row.get("type") != candidate.get("type"):
                 continue
             row_ts = _timestamp_seconds(row.get("timestamp"))
-            if candidate_ts is not None and row_ts is not None and abs(candidate_ts - row_ts) <= 2:
-                return True
+            if candidate_ts is not None and row_ts is not None:
+                if abs(candidate_ts - row_ts) <= 2:
+                    return True
+                continue
             if row.get("title") == candidate.get("title") and row.get("url") == candidate.get("url"):
                 return True
         return False
 
     def _browser_activity_for_session(session_id: str) -> list[dict]:
-        rows = [e for e in _browser_events if e.get("session_id") == session_id]
+        rows: list[dict] = []
+        db = _get_db()
+        if db and db.is_active:
+            try:
+                from database.student_repository import StudentRepository
+
+                rows = [
+                    _normalize_browser_activity(row)
+                    for row in StudentRepository(db).get_browser_activity(session_id)
+                ]
+            except Exception as exc:
+                log_event(
+                    _api_logger,
+                    "browser_activity.read_failed",
+                    level="warning",
+                    session_id=session_id,
+                    error=exc.__class__.__name__,
+                )
+        for event in _browser_events:
+            if event.get("session_id") != session_id or _has_near_browser_row(rows, event):
+                continue
+            rows.append(event)
         for event in _get_session_events(session_id):
             row = _browser_activity_from_event(event)
             if not row:
@@ -2014,8 +2056,10 @@ if _FASTAPI_AVAILABLE:
         title: str = "",
         category: str = "Unknown",
         risk: str = "low",
+        source: str = "browser_client",
     ) -> dict:
         risk_points = _browser_risk_points(risk)
+        event_time = datetime.now(timezone.utc)
         record = {
             "session_id": session_id or _active_session_id(),
             "type": event_type,
@@ -2025,10 +2069,38 @@ if _FASTAPI_AVAILABLE:
             "risk": risk,
             "risk_points": risk_points,
             "risk_impact": risk_points,
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "timestamp": datetime.now().isoformat(),
+            "source": source,
+            "time": event_time.strftime("%H:%M:%S"),
+            "timestamp": event_time.isoformat().replace("+00:00", "Z"),
         }
         _browser_events.append(record)
+        if record["session_id"]:
+            db = _get_db()
+            if db and db.is_active:
+                try:
+                    from database.student_repository import StudentRepository
+
+                    StudentRepository(db).insert_browser_activity(
+                        record["session_id"],
+                        event_type,
+                        event_time,
+                        url=url,
+                        title=title,
+                        category=category,
+                        risk_level=risk,
+                        risk_points=risk_points,
+                        source=source,
+                    )
+                except Exception as exc:
+                    log_event(
+                        _api_logger,
+                        "browser_activity.persist_failed",
+                        level="error",
+                        session_id=record["session_id"],
+                        activity_type=event_type,
+                        error=exc.__class__.__name__,
+                    )
+                    _api_error(503, "browser_activity_not_persisted", "Browser activity could not be persisted. Retry the event.")
         return record
 
     def _record_browser_risk_event(
@@ -2126,6 +2198,7 @@ if _FASTAPI_AVAILABLE:
             title=ev.title,
             category=ev.category,
             risk=ev.risk,
+            source=ev.source,
         )
         from core.events.event_types import EVENT_BROWSER_ACTIVITY, EVENT_TAB_SWITCH
 

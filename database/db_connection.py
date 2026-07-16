@@ -286,6 +286,24 @@ class DatabaseConnection:
             )
         self.execute(
             """
+            IF OBJECT_ID('BrowserActivity', 'U') IS NULL
+            CREATE TABLE BrowserActivity (
+                activity_id BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                tenant_id NVARCHAR(64) NULL,
+                session_id NVARCHAR(128) NOT NULL,
+                activity_type NVARCHAR(64) NOT NULL,
+                url NVARCHAR(2048) NULL,
+                title NVARCHAR(1024) NULL,
+                category NVARCHAR(128) NULL,
+                risk_level NVARCHAR(16) NOT NULL DEFAULT 'low',
+                risk_points INT NOT NULL DEFAULT 0,
+                source NVARCHAR(64) NULL,
+                event_time DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+            )
+            """
+        )
+        self.execute(
+            """
             IF OBJECT_ID('Evidence', 'U') IS NULL
             CREATE TABLE Evidence (
                 evidence_id NVARCHAR(64) NOT NULL PRIMARY KEY,
@@ -357,7 +375,7 @@ class DatabaseConnection:
             )
             """
         )
-        for table in ("Users", "Exams", "ExamAssignments", "ExamQuestions", "QuestionOptions", "ExamAttempts", "StudentResponses", "Sessions", "Events", "Evidence", "Reports", "AppSettings"):
+        for table in ("Users", "Exams", "ExamAssignments", "ExamQuestions", "QuestionOptions", "ExamAttempts", "StudentResponses", "Sessions", "Events", "BrowserActivity", "Evidence", "Reports", "AppSettings"):
             self.execute(
                 f"""
                 IF COL_LENGTH('{table}', 'tenant_id') IS NULL
@@ -378,6 +396,7 @@ class DatabaseConnection:
             "IX_StudentResponses_Attempt": "CREATE INDEX IX_StudentResponses_Attempt ON StudentResponses(tenant_id, attempt_id, question_id)",
             "IX_Sessions_UserExam": "CREATE INDEX IX_Sessions_UserExam ON Sessions(tenant_id, user_id, exam_id)",
             "IX_Events_SessionTime": "CREATE INDEX IX_Events_SessionTime ON Events(tenant_id, session_id, event_time)",
+            "IX_BrowserActivity_SessionTime": "CREATE INDEX IX_BrowserActivity_SessionTime ON BrowserActivity(tenant_id, session_id, event_time)",
             "IX_Evidence_Session": "CREATE INDEX IX_Evidence_Session ON Evidence(tenant_id, session_id, created_at)",
             "IX_AuditLogs_TenantTime": "CREATE INDEX IX_AuditLogs_TenantTime ON AuditLogs(tenant_id, created_at DESC)",
             "IX_AuditLogs_ActorTime": "CREATE INDEX IX_AuditLogs_ActorTime ON AuditLogs(actor_user_id, created_at DESC)",

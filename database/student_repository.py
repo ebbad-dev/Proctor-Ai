@@ -110,6 +110,55 @@ class StudentRepository:
             ),
         )
 
+    def insert_browser_activity(
+        self,
+        session_id: str,
+        activity_type: str,
+        event_time: Any,
+        *,
+        url: str = "",
+        title: str = "",
+        category: str = "Unknown",
+        risk_level: str = "low",
+        risk_points: int = 0,
+        source: str = "",
+        tenant_id: str = "",
+    ) -> None:
+        tenant_id = tenant_id or self._tenant_for_session(session_id)
+        self.db.execute(
+            """
+            INSERT INTO BrowserActivity (
+                tenant_id, session_id, activity_type, url, title, category,
+                risk_level, risk_points, source, event_time
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                tenant_id,
+                session_id,
+                activity_type,
+                url,
+                title,
+                category,
+                risk_level,
+                int(risk_points or 0),
+                source,
+                event_time,
+            ),
+        )
+
+    def get_browser_activity(self, session_id: str) -> list[dict]:
+        return self.db.query(
+            """
+            SELECT activity_id, tenant_id, session_id, activity_type, url, title,
+                   category, risk_level, risk_points, source, event_time
+            FROM BrowserActivity
+            WHERE session_id = ?
+            ORDER BY event_time ASC, activity_id ASC
+            """,
+            (session_id,),
+        )
+
     def get_all_sessions(self) -> list[dict]:
         return self.db.query(
             """
