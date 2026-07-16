@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import secrets
@@ -33,13 +34,54 @@ def ensure_user(repo: PlatformRepository, email: str, full_name: str, role: str,
     return repo.create_user(email, full_name, role, hash_password(password))
 
 
+def rotate_existing_user(repo: PlatformRepository, email: str, password: str) -> bool:
+    """Replace an existing E2E password without creating an account or retaining it."""
+    user = repo.get_user_by_email(email)
+    if not user:
+        return False
+    repo.update_password(user["user_id"], hash_password(password))
+    return True
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Prepare disposable ProctorAI E2E identities.")
+    parser.add_argument(
+        "--rotate-only",
+        action="store_true",
+        help="Rotate existing E2E account passwords without creating data or writing seed.json.",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = parse_args()
     student_password = _e2e_password("PROCTORAI_E2E_STUDENT_PASSWORD")
     admin_password = _e2e_password("PROCTORAI_E2E_ADMIN_PASSWORD")
     db = DatabaseConnection()
     if not db.connect(max_retries=1):
         raise RuntimeError("Could not connect to SQL Server for E2E seed data.")
     repo = PlatformRepository(db)
+    if args.rotate_only:
+        rotated = [
+            email
+            for email, password in (
+                (ADMIN_EMAIL, admin_password),
+                (STUDENT_EMAIL, student_password),
+            )
+            if rotate_existing_user(repo, email, password)
+        ]
+        print(
+            json.dumps(
+                {
+                    "rotated_accounts": rotated,
+                    "rotated_count": len(rotated),
+                    "credentials_retained": False,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
     admin = ensure_user(repo, ADMIN_EMAIL, "E2E Admin", "admin", admin_password)
     student = ensure_user(repo, STUDENT_EMAIL, "E2E Student", "student", student_password)
     exam = repo.create_exam(

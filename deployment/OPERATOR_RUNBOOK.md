@@ -134,6 +134,13 @@ credentials to ignored `e2e_artifacts/seed.json` for the capture process. The va
 are not printed. Restrict access to that directory, delete it after verification, and
 disable or remove E2E identities from any non-test database when the run is complete.
 
+To invalidate surviving E2E accounts without creating an exam or retaining their new
+random credentials, run:
+
+```powershell
+.venv\Scripts\python.exe scripts\prepare_e2e_seed.py --rotate-only
+```
+
 ## Verification Checklist
 
 - `GET http://127.0.0.1:5051/health` returns healthy.

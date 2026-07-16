@@ -15,8 +15,41 @@ from core.security import (
     create_media_token,
     decode_browser_guard_token,
     decode_media_token,
+    verify_password,
 )
 from infrastructure.api import fastapi_app as api
+from scripts.prepare_e2e_seed import rotate_existing_user
+
+
+class E2ECredentialRotationTests(unittest.TestCase):
+    class FakeRepository:
+        def __init__(self, user: dict | None) -> None:
+            self.user = user
+            self.updated: tuple[str, str] | None = None
+
+        def get_user_by_email(self, _email: str) -> dict | None:
+            return self.user
+
+        def update_password(self, user_id: str, password_hash: str) -> None:
+            self.updated = (user_id, password_hash)
+
+    def test_existing_e2e_password_is_replaced_with_a_hash(self) -> None:
+        repo = self.FakeRepository({"user_id": "user_e2e"})
+
+        rotated = rotate_existing_user(repo, "student.e2e@proctorai.local", "ephemeral-secret")
+
+        self.assertTrue(rotated)
+        self.assertIsNotNone(repo.updated)
+        self.assertEqual(repo.updated[0], "user_e2e")
+        self.assertTrue(verify_password("ephemeral-secret", repo.updated[1]))
+
+    def test_missing_e2e_identity_is_not_created(self) -> None:
+        repo = self.FakeRepository(None)
+
+        rotated = rotate_existing_user(repo, "missing.e2e@proctorai.local", "ephemeral-secret")
+
+        self.assertFalse(rotated)
+        self.assertIsNone(repo.updated)
 
 
 class AnswerPrivacyTests(unittest.TestCase):

@@ -40,8 +40,8 @@ Before using a real deployment:
 
 1. Rotate production `AUTH_SECRET`, device, database, SMTP, OAuth, and bootstrap
    credentials outside the repository.
-2. Run `scripts/prepare_e2e_seed.py` against the intended test database to rotate
-   any surviving E2E identities, then remove or disable those identities afterward.
+2. Run `scripts/prepare_e2e_seed.py --rotate-only` against the intended test database
+   to invalidate any surviving E2E credentials without retaining replacement values.
 3. Review the quarantine manifest and purge only after the retention/legal-hold
    window permits it.
 4. Commit the sanitized tree and push it to the protected remote repository.
