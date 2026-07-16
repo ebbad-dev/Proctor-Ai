@@ -1,0 +1,3 @@
+# Human-readable direct dependency pins. Production and CI installations use
+# requirements.lock.txt, which includes the full transitive graph and hashes.
+-r requirements.in

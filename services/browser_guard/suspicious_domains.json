@@ -1,0 +1,74 @@
+{
+  "categories": {
+    "ai_assistants": {
+      "risk": "high",
+      "label": "AI Assistant",
+      "domains": [
+        "chatgpt.com", "chat.openai.com", "claude.ai", "gemini.google.com",
+        "bard.google.com", "copilot.microsoft.com", "perplexity.ai",
+        "you.com", "poe.com", "phind.com", "character.ai", "mistral.ai",
+        "huggingface.co", "cohere.com", "writesonic.com", "jasper.ai"
+      ]
+    },
+    "search_engines": {
+      "risk": "medium",
+      "label": "Search Engine",
+      "domains": [
+        "google.com", "bing.com", "yahoo.com", "duckduckgo.com",
+        "baidu.com", "yandex.com", "ecosia.org", "brave.com"
+      ]
+    },
+    "coding_help": {
+      "risk": "high",
+      "label": "Coding Help Site",
+      "domains": [
+        "stackoverflow.com", "github.com", "gitlab.com", "replit.com",
+        "codepen.io", "jsfiddle.net", "leetcode.com", "geeksforgeeks.org",
+        "w3schools.com", "hackerrank.com", "codeforces.com", "codechef.com",
+        "tutorialspoint.com", "javatpoint.com", "programiz.com"
+      ]
+    },
+    "messaging": {
+      "risk": "high",
+      "label": "Messaging App",
+      "domains": [
+        "web.whatsapp.com", "web.telegram.org", "discord.com",
+        "messenger.com", "slack.com", "teams.microsoft.com",
+        "signal.org", "snapchat.com", "instagram.com", "facebook.com"
+      ]
+    },
+    "document_sharing": {
+      "risk": "high",
+      "label": "Document Sharing",
+      "domains": [
+        "docs.google.com", "drive.google.com", "onedrive.live.com",
+        "dropbox.com", "pastebin.com", "notion.so", "evernote.com",
+        "sharepoint.com", "scribd.com", "slideshare.net"
+      ]
+    },
+    "translation": {
+      "risk": "medium",
+      "label": "Translation Tool",
+      "domains": [
+        "translate.google.com", "deepl.com", "bing.com/translator",
+        "reverso.net", "wordreference.com"
+      ]
+    },
+    "social_media": {
+      "risk": "high",
+      "label": "Social Media",
+      "domains": [
+        "twitter.com", "x.com", "reddit.com", "linkedin.com",
+        "tiktok.com", "youtube.com", "twitch.tv"
+      ]
+    },
+    "online_notes": {
+      "risk": "medium",
+      "label": "Online Notes",
+      "domains": [
+        "simplenote.com", "keep.google.com", "onenote.com",
+        "obsidian.md", "roamresearch.com", "logseq.com"
+      ]
+    }
+  }
+}

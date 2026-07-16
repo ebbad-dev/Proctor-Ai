@@ -1,0 +1,13 @@
+{
+  "policy_version": 1,
+  "quarantine_days": 30,
+  "paths": {
+    "screenshots": 30,
+    "reports": 90,
+    "logs": 14,
+    "exports": 30,
+    "e2e_artifacts": 7,
+    "runtime": 1,
+    "backups": 30
+  }
+}

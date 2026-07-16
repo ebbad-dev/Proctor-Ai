@@ -1,0 +1,19 @@
+{
+  "name": "proctorai-workspace",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node launch_proctorai.js",
+    "prod": "powershell -ExecutionPolicy Bypass -File scripts/start_production.ps1",
+    "backend": "python run_fastapi_backend.py",
+    "frontend": "npm --prefix frontend run dev",
+    "browser-guard": "node run_browser_guard.js",
+    "check:backend": "python -m compileall -q infrastructure input monitoring reporting ui utils static config core database",
+    "check:frontend": "npm --prefix frontend run typecheck",
+    "quality": "powershell -ExecutionPolicy Bypass -File scripts/run_quality_checks.ps1",
+    "preflight": ".venv\\Scripts\\python.exe scripts/hardware_preflight.py",
+    "health": "powershell -ExecutionPolicy Bypass -File scripts/health_check.ps1",
+    "sql:smoke": "powershell -ExecutionPolicy Bypass -File scripts/run_sqlserver_live_smoke_desktop.ps1",
+    "sql:backup": "powershell -ExecutionPolicy Bypass -File scripts/backup_sqlserver.ps1"
+  }
+}
