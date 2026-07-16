@@ -5,6 +5,15 @@ from datetime import datetime
 from typing import Any
 
 from core.security import new_id, utc_now
+from core.session_lifecycle import (
+    SESSION_ACTIVE,
+    SESSION_ENDED,
+    SESSION_REVIEWED,
+    SESSION_SUBMITTED,
+    is_active_session,
+    is_terminal_session,
+    normalize_session_status,
+)
 
 DEFAULT_TENANT_ID = "tenant_default"
 
@@ -658,6 +667,21 @@ class PlatformRepository:
         )
         return rows[0] if rows else None
 
+    def active_attempt_for_user(self, user_id: str) -> dict | None:
+        rows = self.db.query(
+            """
+            SELECT TOP 1 a.attempt_id, a.tenant_id, a.exam_id, a.assignment_id, a.session_id,
+                   a.user_id, a.roll_number, a.status, a.started_at, a.submitted_at,
+                   a.score, a.max_score, e.duration_minutes
+            FROM ExamAttempts a
+            JOIN Exams e ON e.exam_id = a.exam_id
+            WHERE a.user_id = ? AND a.status = 'in_progress'
+            ORDER BY a.started_at DESC
+            """,
+            (user_id,),
+        )
+        return rows[0] if rows else None
+
     def create_attempt(
         self,
         *,
@@ -693,6 +717,20 @@ class PlatformRepository:
             ),
         )
         return self.get_attempt(attempt_id) or {}
+
+    def cancel_attempt_start(self, attempt_id: str) -> bool:
+        updated = self.db.execute(
+            """
+            UPDATE ExamAttempts
+            SET status = 'cancelled', updated_at = ?
+            WHERE attempt_id = ? AND status = 'in_progress'
+              AND NOT EXISTS (
+                  SELECT 1 FROM StudentResponses WHERE attempt_id = ?
+              )
+            """,
+            (utc_now(), attempt_id, attempt_id),
+        )
+        return updated != 0
 
     def get_attempt(self, attempt_id: str) -> dict | None:
         rows = self.db.query(
@@ -807,26 +845,63 @@ class PlatformRepository:
         )[0]
 
     def submit_attempt(self, attempt_id: str) -> dict | None:
-        responses = self.get_attempt_responses(attempt_id)
-        score = sum(int(row.get("awarded_marks") or 0) for row in responses)
         attempt = self.get_attempt(attempt_id)
         if not attempt:
             return None
+        if attempt.get("status") == "submitted":
+            if attempt.get("session_id"):
+                self.db.execute(
+                    """
+                    UPDATE Sessions
+                    SET status = CASE WHEN status = ? THEN status ELSE ? END,
+                        end_time = COALESCE(end_time, ?, ?),
+                        final_score = COALESCE(final_score, ?)
+                    WHERE session_id = ?
+                      AND status IN ('Active', 'Submitted', 'Completed', 'Reviewed')
+                    """,
+                    (
+                        SESSION_REVIEWED,
+                        SESSION_SUBMITTED,
+                        attempt.get("submitted_at"),
+                        utc_now(),
+                        int(attempt.get("score") or 0),
+                        attempt["session_id"],
+                    ),
+                )
+            return {**attempt, "idempotent_replay": True}
+        if attempt.get("status") != "in_progress":
+            raise ValueError(f"Cannot submit attempt in state {attempt.get('status') or 'unknown'}")
+        responses = self.get_attempt_responses(attempt_id)
+        score = sum(int(row.get("awarded_marks") or 0) for row in responses)
         max_score = self.exam_max_score(attempt["exam_id"])
-        self.db.execute(
+        submitted_at = utc_now()
+        updated = self.db.execute(
             """
             UPDATE ExamAttempts
             SET status = 'submitted', submitted_at = ?, score = ?, max_score = ?, updated_at = ?
-            WHERE attempt_id = ? AND status <> 'submitted'
+            WHERE attempt_id = ? AND status = 'in_progress'
             """,
-            (utc_now(), score, max_score, utc_now(), attempt_id),
+            (submitted_at, score, max_score, submitted_at, attempt_id),
         )
+        if updated == 0:
+            current = self.get_attempt(attempt_id)
+            if current and current.get("status") == "submitted":
+                return {**current, "idempotent_replay": True}
+            raise RuntimeError("Attempt state changed while it was submitting")
         if attempt.get("session_id"):
             self.db.execute(
-                "UPDATE Sessions SET status = 'Completed', end_time = ?, final_score = ? WHERE session_id = ?",
-                (utc_now(), score, attempt["session_id"]),
+                """
+                UPDATE Sessions
+                SET status = CASE WHEN status = ? THEN status ELSE ? END,
+                    end_time = COALESCE(end_time, ?),
+                    final_score = ?
+                WHERE session_id = ?
+                  AND status IN ('Active', 'Submitted', 'Completed', 'Reviewed')
+                """,
+                (SESSION_REVIEWED, SESSION_SUBMITTED, submitted_at, score, attempt["session_id"]),
             )
-        return self.get_attempt(attempt_id)
+        submitted = self.get_attempt(attempt_id)
+        return {**submitted, "idempotent_replay": False} if submitted else None
 
     def exam_max_score(self, exam_id: str) -> int:
         rows = self.db.query(
@@ -878,11 +953,51 @@ class PlatformRepository:
             (exam_id,),
         )
 
-    def end_session(self, session_id: str) -> None:
-        self.db.execute(
-            "UPDATE Sessions SET status = 'Completed', end_time = ? WHERE session_id = ?",
-            (utc_now(), session_id),
+    def end_session(self, session_id: str) -> dict | None:
+        rows = self.db.query(
+            "SELECT session_id, status, end_time FROM Sessions WHERE session_id = ?",
+            (session_id,),
         )
+        if not rows:
+            return None
+        status = normalize_session_status(rows[0].get("status"))
+        if is_terminal_session(status):
+            return {
+                "session_id": session_id,
+                "status": status,
+                "end_time": rows[0].get("end_time"),
+                "idempotent_replay": True,
+            }
+        if not is_active_session(status):
+            raise ValueError(f"Cannot end session in state {status or 'unknown'}")
+        ended_at = utc_now()
+        updated = self.db.execute(
+            """
+            UPDATE Sessions
+            SET status = ?, end_time = COALESCE(end_time, ?)
+            WHERE session_id = ? AND status = ?
+            """,
+            (SESSION_ENDED, ended_at, session_id, SESSION_ACTIVE),
+        )
+        if updated == 0:
+            current = self.db.query(
+                "SELECT session_id, status, end_time FROM Sessions WHERE session_id = ?",
+                (session_id,),
+            )
+            if current and is_terminal_session(current[0].get("status")):
+                return {
+                    "session_id": session_id,
+                    "status": normalize_session_status(current[0].get("status")),
+                    "end_time": current[0].get("end_time"),
+                    "idempotent_replay": True,
+                }
+            raise RuntimeError("Session state changed while it was ending")
+        return {
+            "session_id": session_id,
+            "status": SESSION_ENDED,
+            "end_time": ended_at,
+            "idempotent_replay": False,
+        }
 
     def insert_evidence(
         self,

@@ -23,6 +23,13 @@ def main() -> int:
     browser_ingest_id = uuid4().hex
     event_ingest_id = uuid4().hex
     try:
+        repo.upsert_session(
+            session_id,
+            student_id="student_phase1_smoke",
+            user_id="student_phase1_smoke",
+            tenant_id="tenant_default",
+            status="Active",
+        )
         event_schema = db.query(
             """
             SELECT CHARACTER_MAXIMUM_LENGTH AS max_length
@@ -32,7 +39,7 @@ def main() -> int:
         )
         if not event_schema or int(event_schema[0].get("max_length") or 0) < 128:
             raise RuntimeError("Events.session_id was not migrated to NVARCHAR(128)")
-        repo.insert_browser_activity(
+        browser_inserted = repo.insert_browser_activity(
             session_id,
             "tab_switch",
             datetime.now(UTC),
@@ -45,6 +52,8 @@ def main() -> int:
             ingest_id=browser_ingest_id,
             tenant_id="tenant_default",
         )
+        if not browser_inserted:
+            raise RuntimeError("Active-session browser activity was not inserted")
         browser_duplicate_rejected = False
         try:
             repo.insert_browser_activity(
@@ -61,7 +70,7 @@ def main() -> int:
         if len(rows) != 1 or rows[0].get("source") != "phase1_smoke" or not browser_duplicate_rejected:
             raise RuntimeError("Browser activity did not round-trip through SQL Server")
 
-        repo.insert_event(
+        event_inserted = repo.insert_event(
             session_id,
             "student_phase1_smoke",
             "Phase 1 Smoke",
@@ -71,6 +80,8 @@ def main() -> int:
             tenant_id="tenant_default",
             ingest_id=event_ingest_id,
         )
+        if not event_inserted:
+            raise RuntimeError("Active-session event was not inserted")
         event_duplicate_rejected = False
         try:
             repo.insert_event(
@@ -100,6 +111,7 @@ def main() -> int:
     finally:
         db.execute("DELETE FROM BrowserActivity WHERE session_id = ?", (session_id,))
         db.execute("DELETE FROM Events WHERE session_id = ?", (session_id,))
+        db.execute("DELETE FROM Sessions WHERE session_id = ?", (session_id,))
         db.close()
 
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from core.session_lifecycle import SESSION_REVIEWED
+
 
 class StudentRepository:
     def __init__(self, db):
@@ -42,7 +44,10 @@ class StudentRepository:
                 user_id = COALESCE(NULLIF(?, ''), target.user_id),
                 exam_id = COALESCE(NULLIF(?, ''), target.exam_id),
                 tenant_id = COALESCE(NULLIF(?, ''), target.tenant_id),
-                status = ?
+                status = CASE
+                    WHEN target.status IS NULL OR target.status = 'Active' THEN ?
+                    ELSE target.status
+                END
             WHEN NOT MATCHED THEN INSERT
                 (session_id, tenant_id, user_id, exam_id, student_id, student_name, roll_number, exam_code, start_time, status)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
@@ -85,15 +90,18 @@ class StudentRepository:
         bounding_box_json: str = "",
         evidence_id: str = "",
         ingest_id: str = "",
-    ) -> None:
+    ) -> bool:
         tenant_id = tenant_id or self._tenant_for_session(session_id)
-        self.db.execute(
+        inserted = self.db.execute(
             """
             INSERT INTO Events (
                 tenant_id, session_id, student_id, event_type, event_time, risk_points,
                 confidence, model_name, detection_class, bounding_box_json, evidence_id, ingest_id, notes
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE EXISTS (
+                SELECT 1 FROM Sessions WHERE session_id = ? AND status = 'Active'
+            )
             """,
             (
                 tenant_id,
@@ -109,8 +117,10 @@ class StudentRepository:
                 evidence_id,
                 ingest_id or None,
                 notes,
+                session_id,
             ),
         )
+        return inserted != 0
 
     def event_ingest_exists(self, ingest_id: str) -> bool:
         if not ingest_id:
@@ -132,15 +142,18 @@ class StudentRepository:
         source: str = "",
         ingest_id: str = "",
         tenant_id: str = "",
-    ) -> None:
+    ) -> bool:
         tenant_id = tenant_id or self._tenant_for_session(session_id)
-        self.db.execute(
+        inserted = self.db.execute(
             """
             INSERT INTO BrowserActivity (
                 tenant_id, session_id, activity_type, url, title, category,
                 risk_level, risk_points, source, ingest_id, event_time
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE EXISTS (
+                SELECT 1 FROM Sessions WHERE session_id = ? AND status = 'Active'
+            )
             """,
             (
                 tenant_id,
@@ -154,8 +167,10 @@ class StudentRepository:
                 source,
                 ingest_id or None,
                 event_time,
+                session_id,
             ),
         )
+        return inserted != 0
 
     def browser_activity_ingest_exists(self, ingest_id: str) -> bool:
         if not ingest_id:
@@ -229,6 +244,26 @@ class StudentRepository:
         )
         return rows[0] if rows else None
 
+    def get_session_status(self, session_id: str) -> str | None:
+        rows = self.db.query(
+            "SELECT status FROM Sessions WHERE session_id = ?",
+            (session_id,),
+        )
+        return str(rows[0].get("status") or "") if rows else None
+
+    def get_active_session_for_user(self, user_id: str) -> dict | None:
+        rows = self.db.query(
+            """
+            SELECT TOP 1 session_id, tenant_id, user_id, exam_id, student_id,
+                   student_name, roll_number, exam_code, start_time, status
+            FROM Sessions
+            WHERE user_id = ? AND status = 'Active'
+            ORDER BY start_time DESC
+            """,
+            (user_id,),
+        )
+        return rows[0] if rows else None
+
     def get_events(self, session_id: str) -> list[dict]:
         return self.db.query(
             """
@@ -241,12 +276,14 @@ class StudentRepository:
             (session_id,),
         )
 
-    def update_session_review(self, session_id: str, review_mark: str, instructor_notes: str) -> None:
-        self.db.execute(
+    def update_session_review(self, session_id: str, review_mark: str, instructor_notes: str) -> bool:
+        updated = self.db.execute(
             """
             UPDATE Sessions
-            SET review_mark = ?, instructor_notes = ?
+            SET review_mark = ?, instructor_notes = ?, status = ?
             WHERE session_id = ?
+              AND status IN ('Submitted', 'Ended', 'Completed', 'Reviewed')
             """,
-            (review_mark, instructor_notes, session_id),
+            (review_mark, instructor_notes, SESSION_REVIEWED, session_id),
         )
+        return updated != 0

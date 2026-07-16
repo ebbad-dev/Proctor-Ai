@@ -28,8 +28,15 @@ batch.
 ## Batch 3: session lifecycle integrity
 
 - Enforce explicit setup, active, submitted, ended, and reviewed transitions.
-- Make start/end/submit operations idempotent.
-- Prevent parallel active attempts and conflicting active proctor sessions.
+- Preserve terminal session states so late monitoring traffic cannot reopen them.
+- Make session start/end, proctor start, and attempt submission idempotent.
+- Preserve the original end/submission timestamp and score on request replay.
+- Reject review while a session is active and transition terminal sessions to reviewed.
+- Prevent parallel active attempts and conflicting active proctor sessions in the API.
+- Enforce one active attempt per student with a filtered SQL unique index.
+- Compensate a partially failed attempt start so it cannot leave an orphaned active lock.
+- Verify lifecycle transitions, late-event rejection, the unique active-attempt rule, and
+  cleanup against live SQL Server with `npm run sql:lifecycle-smoke`.
 
 ## Batch 4: integration and maintainability
 

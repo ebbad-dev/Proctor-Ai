@@ -412,6 +412,7 @@ class DatabaseConnection:
             "IX_ExamQuestions_Exam": "CREATE INDEX IX_ExamQuestions_Exam ON ExamQuestions(tenant_id, exam_id, sort_order)",
             "IX_QuestionOptions_Question": "CREATE INDEX IX_QuestionOptions_Question ON QuestionOptions(tenant_id, question_id, sort_order)",
             "IX_ExamAttempts_UserExam": "CREATE INDEX IX_ExamAttempts_UserExam ON ExamAttempts(tenant_id, user_id, exam_id, status)",
+            "UX_ExamAttempts_ActiveUser": "CREATE UNIQUE INDEX UX_ExamAttempts_ActiveUser ON ExamAttempts(user_id) WHERE status = 'in_progress'",
             "IX_StudentResponses_Attempt": "CREATE INDEX IX_StudentResponses_Attempt ON StudentResponses(tenant_id, attempt_id, question_id)",
             "IX_Sessions_UserExam": "CREATE INDEX IX_Sessions_UserExam ON Sessions(tenant_id, user_id, exam_id)",
             "IX_Events_SessionTime": "CREATE INDEX IX_Events_SessionTime ON Events(tenant_id, session_id, event_time)",

@@ -247,6 +247,8 @@ if _FASTAPI_AVAILABLE:
     class ReviewResponse(BaseModel):
         status: str
         session_id: str
+        session_status: Optional[str] = None
+        idempotent_replay: bool = False
 
     class ErrorResponse(BaseModel):
         detail: str
@@ -259,6 +261,7 @@ if _FASTAPI_AVAILABLE:
     class ProctorControlResponse(BaseModel):
         status: str
         session_id: Optional[str] = None
+        idempotent_replay: bool = False
 
     class UserPublic(BaseModel):
         user_id: str
@@ -1346,27 +1349,73 @@ if _FASTAPI_AVAILABLE:
         active = repo.active_attempt_for_student(req.exam_id, user["user_id"])
         if active and _attempt_expired({**active, "duration_minutes": exam.get("duration_minutes")}):
             repo.submit_attempt(active["attempt_id"])
-            if active.get("session_id"):
+            if active.get("session_id") and _active_session_id() == active.get("session_id"):
                 _write_active_proctor_state(False)
                 _clear_active_session(active.get("session_id"))
             _api_error(409, "attempt_locked", "The previous attempt reached its time limit and was submitted automatically.")
         if active:
             attempt = active
         else:
+            competing = repo.active_attempt_for_user(user["user_id"])
+            if competing:
+                if _attempt_expired(competing):
+                    repo.submit_attempt(competing["attempt_id"])
+                    if competing.get("session_id") and _active_session_id() == competing.get("session_id"):
+                        _write_active_proctor_state(False)
+                        _clear_active_session(competing.get("session_id"))
+                    _api_error(
+                        409,
+                        "attempt_locked",
+                        "A previous active attempt reached its time limit and was submitted automatically. Retry starting this exam.",
+                    )
+                _api_error(
+                    409,
+                    "active_attempt_conflict",
+                    "Finish the active exam attempt before starting another exam.",
+                )
             from core.security import new_id
             session_id = req.session_id or new_id("session")
-            attempt = repo.create_attempt(
-                exam_id=req.exam_id,
-                user_id=user["user_id"],
-                roll_number=roll_number,
-                assignment_id=assignment.get("assignment_id") or "",
-                session_id=session_id,
-                tenant_id=exam.get("tenant_id") or _tenant_id(user),
-            )
             from database.student_repository import StudentRepository
             db = _get_db()
-            if db and db.is_active:
-                StudentRepository(db).upsert_session(
+            if not db or not db.is_active:
+                _api_error(503, "database_unavailable", "Attempt persistence is unavailable. Retry attempt start.")
+            session_repo = StudentRepository(db)
+            from core.session_lifecycle import is_active_session
+            existing_session = session_repo.get_session(session_id)
+            if existing_session:
+                if existing_session.get("user_id") != user["user_id"]:
+                    _api_error(403, "forbidden", "The requested session belongs to another student.")
+                if not is_active_session(existing_session.get("status")):
+                    _api_error(409, "session_closed", "A completed session cannot be reused for a new attempt.")
+                if existing_session.get("exam_id") and existing_session.get("exam_id") != req.exam_id:
+                    _api_error(409, "session_exam_conflict", "The requested session belongs to another exam.")
+            active_proctor_session = _active_session_id()
+            if active_proctor_session and active_proctor_session != session_id:
+                _api_error(409, "proctor_busy", "Stop the active proctor session before starting another attempt.")
+            try:
+                attempt = repo.create_attempt(
+                    exam_id=req.exam_id,
+                    user_id=user["user_id"],
+                    roll_number=roll_number,
+                    assignment_id=assignment.get("assignment_id") or "",
+                    session_id=session_id,
+                    tenant_id=exam.get("tenant_id") or _tenant_id(user),
+                )
+            except Exception as exc:
+                competing = repo.active_attempt_for_user(user["user_id"])
+                if competing:
+                    _api_error(409, "active_attempt_conflict", "An active exam attempt already exists.")
+                log_event(
+                    _api_logger,
+                    "attempt.start_failed",
+                    level="error",
+                    exam_id=req.exam_id,
+                    user_id=user["user_id"],
+                    error=exc.__class__.__name__,
+                )
+                _api_error(503, "attempt_not_started", "The attempt could not be persisted. Retry attempt start.")
+            try:
+                session_repo.upsert_session(
                     session_id,
                     student_id=user["user_id"],
                     student_name=user.get("full_name", ""),
@@ -1378,6 +1427,27 @@ if _FASTAPI_AVAILABLE:
                     start_time=datetime.now(timezone.utc),
                     status="Active",
                 )
+                persisted_session_status = session_repo.get_session_status(session_id)
+            except Exception as exc:
+                try:
+                    repo.cancel_attempt_start(attempt["attempt_id"])
+                except Exception:
+                    pass
+                log_event(
+                    _api_logger,
+                    "attempt.session_start_failed",
+                    level="error",
+                    attempt_id=attempt.get("attempt_id"),
+                    session_id=session_id,
+                    error=exc.__class__.__name__,
+                )
+                _api_error(503, "session_not_persisted", "The attempt session could not be persisted. Retry attempt start.")
+            if not is_active_session(persisted_session_status):
+                try:
+                    repo.cancel_attempt_start(attempt["attempt_id"])
+                except Exception:
+                    pass
+                _api_error(409, "session_closed", "The session ended while the attempt was starting. Start with a new session.")
             _session_meta.update({
                 "session_id": session_id,
                 "student_id": user["user_id"],
@@ -1415,7 +1485,7 @@ if _FASTAPI_AVAILABLE:
             _api_error(403, "forbidden", "This attempt belongs to another institution.")
         if attempt.get("status") == "in_progress" and _attempt_expired(attempt):
             attempt = repo.submit_attempt(attempt_id) or attempt
-            if attempt.get("session_id"):
+            if attempt.get("session_id") and _active_session_id() == attempt.get("session_id"):
                 _write_active_proctor_state(False)
                 _clear_active_session(attempt.get("session_id"))
         include_correct = user["role"] in {"instructor", "admin"}
@@ -1436,11 +1506,11 @@ if _FASTAPI_AVAILABLE:
             _api_error(404, "not_found", "Attempt not found.")
         if attempt.get("user_id") != user["user_id"]:
             _api_error(403, "forbidden", "You can only update your own attempt.")
-        if attempt.get("status") == "submitted":
-            _api_error(409, "attempt_locked", "This attempt has already been submitted.")
+        if attempt.get("status") != "in_progress":
+            _api_error(409, "attempt_locked", "This attempt is no longer active.")
         if _attempt_expired(attempt):
             repo.submit_attempt(attempt_id)
-            if attempt.get("session_id"):
+            if attempt.get("session_id") and _active_session_id() == attempt.get("session_id"):
                 _write_active_proctor_state(False)
                 _clear_active_session(attempt.get("session_id"))
             _api_error(409, "attempt_expired", "The exam time limit was reached and the attempt was submitted automatically.")
@@ -1469,29 +1539,47 @@ if _FASTAPI_AVAILABLE:
             _api_error(404, "not_found", "Attempt not found.")
         if attempt.get("user_id") != user["user_id"]:
             _api_error(403, "forbidden", "You can only submit your own attempt.")
-        if attempt.get("status") == "submitted":
-            _api_error(409, "attempt_locked", "This attempt has already been submitted.")
-        submitted = repo.submit_attempt(attempt_id)
+        if attempt.get("status") not in {"in_progress", "submitted"}:
+            _api_error(409, "invalid_attempt_state", "This attempt cannot be submitted from its current state.")
+        idempotent_replay = attempt.get("status") == "submitted"
+        try:
+            submitted = repo.submit_attempt(attempt_id)
+        except ValueError:
+            _api_error(409, "invalid_attempt_state", "This attempt cannot be submitted from its current state.")
         if not submitted:
             _api_error(500, "submit_failed", "Could not submit attempt.")
+        idempotent_replay = bool(submitted.get("idempotent_replay", idempotent_replay))
         if submitted.get("session_id"):
             submitted = dict(submitted)
             submitted["risk_score"] = min(
                 sum(int(row.get("risk_points") or 0) for row in _get_session_events(submitted["session_id"])),
                 100,
             )
-        if submitted.get("session_id"):
+        if submitted.get("session_id") and _active_session_id() == submitted.get("session_id"):
             _write_active_proctor_state(False)
             _clear_active_session(submitted.get("session_id"))
         report = None
         if req.generate_report and submitted.get("session_id"):
             try:
-                path = _generate_report_file(submitted["session_id"])
+                from config.settings import REPORTS_DIR
+                existing_path = os.path.join(REPORTS_DIR, f"{submitted['session_id']}_report.pdf")
+                path = existing_path if idempotent_replay and os.path.exists(existing_path) else _generate_report_file(submitted["session_id"])
                 report = _report_metadata(submitted["session_id"], path)
             except Exception:
                 report = None
-        _audit("attempt.submitted", actor=user, resource_type="attempt", resource_id=attempt_id, details={"score": submitted.get("score"), "max_score": submitted.get("max_score")}, request=request)
-        return {**_format_attempt(submitted, responses=repo.get_attempt_responses(attempt_id)), "report": report}
+        _audit(
+            "attempt.submit_replayed" if idempotent_replay else "attempt.submitted",
+            actor=user,
+            resource_type="attempt",
+            resource_id=attempt_id,
+            details={"score": submitted.get("score"), "max_score": submitted.get("max_score")},
+            request=request,
+        )
+        return {
+            **_format_attempt(submitted, responses=repo.get_attempt_responses(attempt_id)),
+            "report": report,
+            "idempotent_replay": idempotent_replay,
+        }
 
     @app.get("/exams/{exam_id}/attendance")
     def exam_attendance(exam_id: str, user: dict = Depends(_require_roles("instructor", "admin"))):
@@ -2050,8 +2138,24 @@ if _FASTAPI_AVAILABLE:
         try:
             if repo.event_ingest_exists(ingest_id):
                 return {**record, "duplicate": True}
-            repo.upsert_session(session_id, student_id=student_id, status="Active")
-            repo.insert_event(
+            session_status = repo.get_session_status(session_id)
+        except Exception as exc:
+            log_event(
+                _api_logger,
+                "event.preflight_failed",
+                level="error",
+                session_id=session_id,
+                event_type=event_type,
+                error=exc.__class__.__name__,
+            )
+            _api_error(503, "event_preflight_failed", "The event could not be validated. Retry the event.")
+        if session_status is None:
+            _api_error(404, "session_not_found", "The event session does not exist.")
+        from core.session_lifecycle import is_active_session
+        if not is_active_session(session_status):
+            _api_error(409, "session_not_active", "Events cannot be added after a session has ended.")
+        try:
+            inserted = repo.insert_event(
                 session_id,
                 student_id,
                 event_type,
@@ -2081,6 +2185,8 @@ if _FASTAPI_AVAILABLE:
                 error=exc.__class__.__name__,
             )
             _api_error(503, "event_not_persisted", "The proctor event could not be persisted. Retry the event.")
+        if not inserted:
+            _api_error(409, "session_not_active", "Events cannot be added after a session has ended.")
         _ensure_fallback_session(session_id, student_id)
         _events.append(record)
         return record
@@ -2127,7 +2233,24 @@ if _FASTAPI_AVAILABLE:
         try:
             if repo.browser_activity_ingest_exists(resolved_ingest_id):
                 return {**record, "duplicate": True}
-            repo.insert_browser_activity(
+            session_status = repo.get_session_status(resolved_session_id)
+        except Exception as exc:
+            log_event(
+                _api_logger,
+                "browser_activity.preflight_failed",
+                level="error",
+                session_id=resolved_session_id,
+                activity_type=event_type,
+                error=exc.__class__.__name__,
+            )
+            _api_error(503, "browser_activity_preflight_failed", "Browser activity could not be validated. Retry the event.")
+        if session_status is None:
+            _api_error(404, "session_not_found", "The browser activity session does not exist.")
+        from core.session_lifecycle import is_active_session
+        if not is_active_session(session_status):
+            _api_error(409, "session_not_active", "Browser activity cannot be added after a session has ended.")
+        try:
+            inserted = repo.insert_browser_activity(
                 resolved_session_id,
                 event_type,
                 event_time,
@@ -2155,6 +2278,8 @@ if _FASTAPI_AVAILABLE:
                 error=exc.__class__.__name__,
             )
             _api_error(503, "browser_activity_not_persisted", "Browser activity could not be persisted. Retry the event.")
+        if not inserted:
+            _api_error(409, "session_not_active", "Browser activity cannot be added after a session has ended.")
         _browser_events.append(record)
         return record
 
@@ -2543,8 +2668,9 @@ if _FASTAPI_AVAILABLE:
     def start_session(meta: SessionMeta, request: Request, user: dict = Depends(_current_user)):
         from core.security import new_id
         session_id = meta.session_id or new_id("session")
-        meta_data = meta.model_dump()
-        meta_data["session_id"] = session_id
+        active_session_id = _active_session_id()
+        if active_session_id and active_session_id != session_id:
+            _api_error(409, "proctor_busy", "Stop the active proctor session before starting another session.")
         if user["role"] == "student" and meta.exam_id:
             repo = _repo()
             if not repo.exam_assigned_to_student(meta.exam_id, user["user_id"]):
@@ -2553,72 +2679,156 @@ if _FASTAPI_AVAILABLE:
         if not db or not db.is_active:
             _api_error(503, "database_unavailable", "Session persistence is unavailable. Retry session start.")
         started_at = datetime.now(timezone.utc)
-        try:
-            from database.student_repository import StudentRepository
+        owner_student_id = user["user_id"] if user["role"] == "student" else (meta.student_id or user["user_id"])
+        from database.student_repository import StudentRepository
+        from core.session_lifecycle import is_active_session
 
-            StudentRepository(db).upsert_session(
-                session_id,
-                student_id=meta.student_id or user["user_id"],
-                student_name=meta.student_name or user.get("full_name", ""),
-                exam_code=meta.exam_code or meta.exam_id,
-                user_id=user["user_id"],
-                exam_id=meta.exam_id,
-                roll_number=meta.roll_number,
-                tenant_id=_tenant_id(user),
-                start_time=started_at,
-                status="Active",
-            )
+        session_repo = StudentRepository(db)
+        try:
+            existing = session_repo.get_session(session_id)
+            active_for_user = session_repo.get_active_session_for_user(user["user_id"])
         except Exception as exc:
             log_event(
                 _api_logger,
-                "session.persist_failed",
+                "session.preflight_failed",
                 level="error",
                 session_id=session_id,
                 error=exc.__class__.__name__,
             )
-            _api_error(503, "session_not_persisted", "The session could not be persisted. Retry session start.")
+            _api_error(503, "session_preflight_failed", "The session could not be validated. Retry session start.")
+        if active_for_user and active_for_user.get("session_id") != session_id:
+            _api_error(409, "active_session_conflict", "Finish the active session before starting another one.")
+        if existing:
+            _require_session_access(session_id, user)
+            if not is_active_session(existing.get("status")):
+                _api_error(409, "session_closed", "A completed session cannot be started again.")
+            idempotent_replay = True
+        else:
+            try:
+                session_repo.upsert_session(
+                    session_id,
+                    student_id=owner_student_id,
+                    student_name=meta.student_name or user.get("full_name", ""),
+                    exam_code=meta.exam_code or meta.exam_id,
+                    user_id=user["user_id"],
+                    exam_id=meta.exam_id,
+                    roll_number=meta.roll_number,
+                    tenant_id=_tenant_id(user),
+                    start_time=started_at,
+                    status="Active",
+                )
+            except Exception as exc:
+                log_event(
+                    _api_logger,
+                    "session.persist_failed",
+                    level="error",
+                    session_id=session_id,
+                    error=exc.__class__.__name__,
+                )
+                _api_error(503, "session_not_persisted", "The session could not be persisted. Retry session start.")
+            existing = {
+                **meta.model_dump(),
+                "session_id": session_id,
+                "student_id": owner_student_id,
+                "student_name": meta.student_name or user.get("full_name", ""),
+                "user_id": user["user_id"],
+                "tenant_id": _tenant_id(user),
+                "status": "Active",
+                "start_time": started_at,
+            }
+            idempotent_replay = False
+        meta_data = {
+            "session_id": session_id,
+            "student_name": existing.get("student_name") or "",
+            "student_id": existing.get("student_id") or owner_student_id,
+            "exam_code": existing.get("exam_code") or "",
+            "exam_id": existing.get("exam_id") or "",
+            "roll_number": existing.get("roll_number") or "",
+        }
+        persisted_started_at = existing.get("start_time") or started_at
+        started_at_iso = _iso(persisted_started_at)
+        _session_meta.clear()
         _session_meta.update(meta_data)
         _session_meta["user_id"] = user["user_id"]
-        _session_meta["started_at"] = started_at.isoformat().replace("+00:00", "Z")
+        _session_meta["started_at"] = started_at_iso
         _session_store[session_id] = {
             **meta_data,
             "user_id": user["user_id"],
             "tenant_id": _tenant_id(user),
             "status": "Active",
-            "started_at": _session_meta["started_at"],
+            "started_at": started_at_iso,
         }
-        _write_active_proctor_state(True, session_id, meta.student_id or user["user_id"], meta.exam_code)
+        _write_active_proctor_state(True, session_id, meta_data["student_id"], meta_data["exam_code"])
         _audit(
-            "session.started",
+            "session.start_replayed" if idempotent_replay else "session.started",
             actor=user,
             resource_type="session",
             resource_id=session_id,
-            details={"exam_id": meta.exam_id, "exam_code": meta.exam_code},
+            details={"exam_id": meta_data["exam_id"], "exam_code": meta_data["exam_code"]},
             request=request,
         )
-        return {"status": "ok", "session_id": session_id, "persistence": "persisted"}
+        return {
+            "status": "ok",
+            "session_id": session_id,
+            "session_status": "Active",
+            "persistence": "persisted",
+            "idempotent_replay": idempotent_replay,
+        }
 
     @app.post("/sessions/{session_id}/end")
     def end_session(session_id: str, req: SessionEndRequest, request: Request, user: dict = Depends(_current_user)):
         _require_session_access(session_id, user)
         repo = _repo()
-        repo.end_session(session_id)
+        try:
+            result = repo.end_session(session_id)
+        except ValueError:
+            _api_error(409, "invalid_session_state", "The session cannot be ended from its current state.")
+        if not result:
+            _api_error(404, "not_found", "Session not found.")
         if _active_session_id() == session_id:
             _write_active_proctor_state(False)
             _clear_active_session(session_id)
         report = None
         if req.generate_report:
             try:
-                path = _generate_report_file(session_id)
+                from config.settings import REPORTS_DIR
+                existing_path = os.path.join(REPORTS_DIR, f"{session_id}_report.pdf")
+                path = existing_path if result["idempotent_replay"] and os.path.exists(existing_path) else _generate_report_file(session_id)
                 report = _report_metadata(session_id, path)
             except Exception:
                 report = None
-        _audit("session.ended", actor=user, resource_type="session", resource_id=session_id, request=request)
-        return {"status": "ok", "session_id": session_id, "report": report}
+        _audit(
+            "session.end_replayed" if result["idempotent_replay"] else "session.ended",
+            actor=user,
+            resource_type="session",
+            resource_id=session_id,
+            request=request,
+        )
+        return {
+            "status": "ok",
+            "session_id": session_id,
+            "session_status": result["status"],
+            "idempotent_replay": result["idempotent_replay"],
+            "report": report,
+        }
 
     @app.post("/proctor/start", response_model=ProctorControlResponse)
     def start_proctor(req: ProctorStartRequest, user: dict = Depends(_require_roles("student"))):
         _require_session_access(req.session_id, user)
+        active_session_id = _active_session_id()
+        if active_session_id and active_session_id != req.session_id:
+            _api_error(409, "proctor_busy", "Another proctor session is already active.")
+        db = _get_db()
+        if not db or not db.is_active:
+            _api_error(503, "database_unavailable", "Session state cannot be verified. Retry proctor start.")
+        from database.student_repository import StudentRepository
+        from core.session_lifecycle import is_active_session
+        session_status = StudentRepository(db).get_session_status(req.session_id)
+        if session_status is None:
+            _api_error(404, "not_found", "Session not found.")
+        if not is_active_session(session_status):
+            _api_error(409, "session_closed", "A completed session cannot restart proctoring.")
+        idempotent_replay = active_session_id == req.session_id
         session = _session_store.setdefault(
             req.session_id,
             {
@@ -2635,7 +2845,7 @@ if _FASTAPI_AVAILABLE:
             _session_meta["exam_code"] = req.exam_code
         session["status"] = "Active"
         _write_active_proctor_state(True, req.session_id, user["user_id"], req.exam_code)
-        return {"status": "ok", "session_id": req.session_id}
+        return {"status": "ok", "session_id": req.session_id, "idempotent_replay": idempotent_replay}
 
     @app.post("/proctor/stop", response_model=ProctorControlResponse)
     def stop_proctor(user: dict = Depends(_require_roles("student"))):
@@ -2953,18 +3163,43 @@ if _FASTAPI_AVAILABLE:
 
     @app.post("/sessions/{session_id}/review", response_model=ReviewResponse)
     def submit_review(session_id: str, req: ReviewRequest, request: Request, user: dict = Depends(_require_roles("instructor", "admin"))):
+        _require_session_access(session_id, user)
         db = _get_db()
         if not db or not db.is_active:
-            _ensure_fallback_session(session_id)
-            _session_reviews[session_id] = req.model_dump()
-            _audit("session.reviewed", actor=user, resource_type="session", resource_id=session_id, request=request)
-            return {"status": "ok", "session_id": session_id}
+            _api_error(503, "database_unavailable", "Review persistence is unavailable. Retry the review.")
 
         from database.student_repository import StudentRepository
+        from core.session_lifecycle import (
+            SESSION_REVIEWED,
+            is_active_session,
+            is_reviewable_session,
+            normalize_session_status,
+        )
         repo = StudentRepository(db)
-        repo.update_session_review(session_id, req.review_mark, req.instructor_notes)
-        _audit("session.reviewed", actor=user, resource_type="session", resource_id=session_id, request=request)
-        return {"status": "ok", "session_id": session_id}
+        session = repo.get_session(session_id)
+        if not session:
+            _api_error(404, "not_found", "Session not found.")
+        session_status = normalize_session_status(session.get("status"))
+        if is_active_session(session_status):
+            _api_error(409, "session_active", "End or submit the session before reviewing it.")
+        if not is_reviewable_session(session_status):
+            _api_error(409, "invalid_session_state", "The session is not ready for review.")
+        idempotent_replay = session_status == SESSION_REVIEWED
+        if not repo.update_session_review(session_id, req.review_mark, req.instructor_notes):
+            _api_error(409, "review_conflict", "The session state changed before the review was saved. Retry the review.")
+        _audit(
+            "session.review_updated" if idempotent_replay else "session.reviewed",
+            actor=user,
+            resource_type="session",
+            resource_id=session_id,
+            request=request,
+        )
+        return {
+            "status": "ok",
+            "session_id": session_id,
+            "session_status": SESSION_REVIEWED,
+            "idempotent_replay": idempotent_replay,
+        }
 
     # ── Assistant ─────────────────────────────────────────────
 

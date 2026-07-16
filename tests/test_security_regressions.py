@@ -18,6 +18,7 @@ from core.security import (
     verify_password,
 )
 from infrastructure.api import fastapi_app as api
+from database.platform_repository import PlatformRepository
 from database.student_repository import StudentRepository
 from scripts.prepare_e2e_seed import rotate_existing_user
 
@@ -163,7 +164,8 @@ class PersistenceHonestyTests(unittest.TestCase):
         with (
             patch.object(api, "_get_db", return_value=self.ActiveDatabase()),
             patch.object(StudentRepository, "event_ingest_exists", return_value=False),
-            patch.object(StudentRepository, "upsert_session", side_effect=RuntimeError("write failed")),
+            patch.object(StudentRepository, "get_session_status", return_value="Active"),
+            patch.object(StudentRepository, "insert_event", side_effect=RuntimeError("write failed")),
         ):
             with self.assertRaises(api.HTTPException) as raised:
                 api._persist_event(
@@ -198,6 +200,7 @@ class PersistenceHonestyTests(unittest.TestCase):
         with (
             patch.object(api, "_get_db", return_value=self.ActiveDatabase()),
             patch.object(StudentRepository, "browser_activity_ingest_exists", return_value=False),
+            patch.object(StudentRepository, "get_session_status", return_value="Active"),
             patch.object(StudentRepository, "insert_browser_activity", side_effect=RuntimeError("write failed")),
         ):
             with self.assertRaises(api.HTTPException) as raised:
@@ -214,6 +217,8 @@ class PersistenceHonestyTests(unittest.TestCase):
     def test_failed_session_start_does_not_create_memory_state(self) -> None:
         with (
             patch.object(api, "_get_db", return_value=self.ActiveDatabase()),
+            patch.object(StudentRepository, "get_session", return_value=None),
+            patch.object(StudentRepository, "get_active_session_for_user", return_value=None),
             patch.object(StudentRepository, "upsert_session", side_effect=RuntimeError("write failed")),
         ):
             with self.assertRaises(api.HTTPException) as raised:
@@ -256,6 +261,318 @@ class PersistenceHonestyTests(unittest.TestCase):
         self.assertEqual(len(post.call_args_list), 3)
         self.assertEqual(len(set(ingest_ids)), 1)
         self.assertEqual(engine.last_error, "")
+
+
+class SessionLifecycleRepositoryTests(unittest.TestCase):
+    class CaptureDatabase:
+        def __init__(self, rows: list[dict] | None = None) -> None:
+            self.rows = rows or []
+            self.executed: list[tuple[str, tuple]] = []
+            self.queries: list[tuple[str, tuple]] = []
+
+        def execute(self, sql: str, params: tuple = ()) -> int:
+            self.executed.append((sql, params))
+            return 1
+
+        def query(self, sql: str, params: tuple = ()) -> list[dict]:
+            self.queries.append((sql, params))
+            return self.rows
+
+    def test_session_upsert_cannot_reopen_a_terminal_state(self) -> None:
+        db = self.CaptureDatabase()
+
+        StudentRepository(db).upsert_session("session_1", status="Active")
+
+        sql, _params = db.executed[0]
+        self.assertIn("WHEN target.status IS NULL OR target.status = 'Active'", sql)
+        self.assertIn("ELSE target.status", sql)
+
+    def test_monitoring_inserts_are_conditioned_on_an_active_session(self) -> None:
+        db = self.CaptureDatabase()
+        repo = StudentRepository(db)
+
+        inserted = repo.insert_event(
+            "session_1",
+            "student_1",
+            "Face Missing",
+            "2026-07-16T10:00:00Z",
+            8,
+            "No face",
+            tenant_id="tenant_1",
+        )
+
+        self.assertTrue(inserted)
+        sql, params = db.executed[0]
+        self.assertIn("WHERE EXISTS", sql)
+        self.assertIn("status = 'Active'", sql)
+        self.assertEqual(params[-1], "session_1")
+
+    def test_terminal_session_end_is_an_idempotent_replay(self) -> None:
+        db = self.CaptureDatabase([
+            {"session_id": "session_1", "status": "Submitted", "end_time": "2026-07-16T10:00:00Z"}
+        ])
+
+        result = PlatformRepository(db).end_session("session_1")
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result["idempotent_replay"])
+        self.assertEqual(result["status"], "Submitted")
+        self.assertEqual(db.executed, [])
+
+    def test_first_session_end_transitions_to_ended_once(self) -> None:
+        db = self.CaptureDatabase([
+            {"session_id": "session_1", "status": "Active", "end_time": None}
+        ])
+
+        result = PlatformRepository(db).end_session("session_1")
+
+        self.assertFalse(result["idempotent_replay"])
+        self.assertEqual(result["status"], "Ended")
+        self.assertIn("COALESCE(end_time", db.executed[0][0])
+
+    def test_submitted_attempt_replay_does_not_regrade(self) -> None:
+        db = self.CaptureDatabase()
+        repo = PlatformRepository(db)
+        attempt = {
+            "attempt_id": "attempt_1",
+            "exam_id": "exam_1",
+            "session_id": "session_1",
+            "status": "submitted",
+            "score": 7,
+            "submitted_at": "2026-07-16T10:00:00Z",
+        }
+
+        with (
+            patch.object(repo, "get_attempt", return_value=attempt),
+            patch.object(repo, "get_attempt_responses", side_effect=AssertionError("must not regrade")),
+        ):
+            result = repo.submit_attempt("attempt_1")
+
+        self.assertTrue(result["idempotent_replay"])
+        self.assertEqual(result["score"], 7)
+        self.assertIn("COALESCE(final_score", db.executed[0][0])
+
+    def test_concurrent_submit_loser_is_reported_as_a_replay(self) -> None:
+        class LostRaceDatabase(self.CaptureDatabase):
+            def execute(self, sql: str, params: tuple = ()) -> int:
+                self.executed.append((sql, params))
+                return 0
+
+        db = LostRaceDatabase()
+        repo = PlatformRepository(db)
+        in_progress = {
+            "attempt_id": "attempt_1",
+            "exam_id": "exam_1",
+            "session_id": "",
+            "status": "in_progress",
+        }
+        submitted = {**in_progress, "status": "submitted", "score": 7, "max_score": 10}
+
+        with (
+            patch.object(repo, "get_attempt", side_effect=[in_progress, submitted]),
+            patch.object(repo, "get_attempt_responses", return_value=[{"awarded_marks": 7}]),
+            patch.object(repo, "exam_max_score", return_value=10),
+        ):
+            result = repo.submit_attempt("attempt_1")
+
+        self.assertTrue(result["idempotent_replay"])
+        self.assertEqual(result["status"], "submitted")
+
+    def test_active_attempt_lookup_covers_all_exams_for_the_user(self) -> None:
+        db = self.CaptureDatabase()
+
+        PlatformRepository(db).active_attempt_for_user("student_1")
+
+        sql, params = db.queries[0]
+        self.assertIn("a.user_id = ? AND a.status = 'in_progress'", sql)
+        self.assertEqual(params, ("student_1",))
+
+
+@unittest.skipUnless(getattr(api, "_FASTAPI_AVAILABLE", False), "FastAPI is not installed")
+class SessionLifecycleApiTests(unittest.TestCase):
+    class ActiveDatabase:
+        is_active = True
+
+    def setUp(self) -> None:
+        api._events.clear()
+        api._browser_events.clear()
+        api._session_meta.clear()
+        api._session_store.clear()
+
+    def test_late_event_is_rejected_without_reopening_the_session(self) -> None:
+        with (
+            patch.object(api, "_get_db", return_value=self.ActiveDatabase()),
+            patch.object(StudentRepository, "event_ingest_exists", return_value=False),
+            patch.object(StudentRepository, "get_session_status", return_value="Ended"),
+            patch.object(StudentRepository, "insert_event") as insert,
+        ):
+            with self.assertRaises(api.HTTPException) as raised:
+                api._persist_event(
+                    "session_1",
+                    "student_1",
+                    "Face Missing",
+                    8,
+                    "No face",
+                    {"ingest_id": "late-event"},
+                )
+
+        self.assertEqual(raised.exception.status_code, 409)
+        insert.assert_not_called()
+        self.assertEqual(api._events, [])
+
+    def test_duplicate_event_retry_is_acknowledged_after_session_end(self) -> None:
+        with (
+            patch.object(api, "_get_db", return_value=self.ActiveDatabase()),
+            patch.object(StudentRepository, "event_ingest_exists", return_value=True),
+            patch.object(StudentRepository, "get_session_status", return_value="Ended") as status,
+        ):
+            result = api._persist_event(
+                "session_1",
+                "student_1",
+                "Face Missing",
+                8,
+                "No face",
+                {"ingest_id": "already-saved"},
+            )
+
+        self.assertTrue(result["duplicate"])
+        status.assert_not_called()
+
+    def test_submitted_attempt_can_be_replayed_without_conflict(self) -> None:
+        attempt = {
+            "attempt_id": "attempt_1",
+            "tenant_id": "tenant_1",
+            "exam_id": "exam_1",
+            "user_id": "student_1",
+            "status": "submitted",
+            "score": 7,
+            "max_score": 10,
+        }
+
+        class FakeRepository:
+            def get_attempt(self, _attempt_id: str) -> dict:
+                return attempt
+
+            def submit_attempt(self, _attempt_id: str) -> dict:
+                return {**attempt, "idempotent_replay": True}
+
+            def get_attempt_responses(self, _attempt_id: str) -> list[dict]:
+                return []
+
+        with (
+            patch.object(api, "_repo", return_value=FakeRepository()),
+            patch.object(api, "_audit"),
+        ):
+            result = api.submit_attempt(
+                "attempt_1",
+                api.AttemptSubmitRequest(generate_report=False),
+                None,
+                {"user_id": "student_1", "role": "student", "tenant_id": "tenant_1"},
+            )
+
+        self.assertTrue(result["idempotent_replay"])
+        self.assertEqual(result["status"], "submitted")
+
+    def test_terminal_session_cannot_be_started_again(self) -> None:
+        ended = {
+            "session_id": "session_1",
+            "user_id": "student_1",
+            "student_id": "student_1",
+            "tenant_id": "tenant_1",
+            "status": "Ended",
+        }
+        with (
+            patch.object(api, "_get_db", return_value=self.ActiveDatabase()),
+            patch.object(api, "_require_session_access"),
+            patch.object(StudentRepository, "get_session", return_value=ended),
+            patch.object(StudentRepository, "get_active_session_for_user", return_value=None),
+        ):
+            with self.assertRaises(api.HTTPException) as raised:
+                api.start_session(
+                    api.SessionMeta(session_id="session_1", student_id="student_1"),
+                    None,
+                    {"user_id": "student_1", "role": "student", "tenant_id": "tenant_1"},
+                )
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(api._session_meta, {})
+
+    def test_active_session_start_is_an_idempotent_replay(self) -> None:
+        active = {
+            "session_id": "session_1",
+            "user_id": "student_1",
+            "student_id": "student_1",
+            "student_name": "Student One",
+            "tenant_id": "tenant_1",
+            "exam_id": "",
+            "exam_code": "",
+            "roll_number": "ROLL-1",
+            "status": "Active",
+            "start_time": "2026-07-16T10:00:00Z",
+        }
+        with (
+            patch.object(api, "_get_db", return_value=self.ActiveDatabase()),
+            patch.object(api, "_require_session_access"),
+            patch.object(api, "_write_active_proctor_state"),
+            patch.object(api, "_audit"),
+            patch.object(StudentRepository, "get_session", return_value=active),
+            patch.object(StudentRepository, "get_active_session_for_user", return_value=active),
+            patch.object(StudentRepository, "upsert_session") as upsert,
+        ):
+            result = api.start_session(
+                api.SessionMeta(session_id="session_1", student_id="student_1"),
+                None,
+                {"user_id": "student_1", "role": "student", "tenant_id": "tenant_1"},
+            )
+
+        self.assertTrue(result["idempotent_replay"])
+        self.assertEqual(result["session_status"], "Active")
+        upsert.assert_not_called()
+
+    def test_proctor_start_rejects_a_conflicting_active_session(self) -> None:
+        api._session_meta["session_id"] = "session_other"
+        with patch.object(api, "_require_session_access"):
+            with self.assertRaises(api.HTTPException) as raised:
+                api.start_proctor(
+                    api.ProctorStartRequest(session_id="session_1"),
+                    {"user_id": "student_1", "role": "student", "tenant_id": "tenant_1"},
+                )
+
+        self.assertEqual(raised.exception.status_code, 409)
+
+    def test_active_session_cannot_be_reviewed(self) -> None:
+        with (
+            patch.object(api, "_require_session_access"),
+            patch.object(api, "_get_db", return_value=self.ActiveDatabase()),
+            patch.object(StudentRepository, "get_session", return_value={"status": "Active"}),
+        ):
+            with self.assertRaises(api.HTTPException) as raised:
+                api.submit_review(
+                    "session_1",
+                    api.ReviewRequest(review_mark="clear", instructor_notes=""),
+                    None,
+                    {"user_id": "instructor_1", "role": "instructor", "tenant_id": "tenant_1"},
+                )
+
+        self.assertEqual(raised.exception.status_code, 409)
+
+    def test_terminal_session_transitions_to_reviewed(self) -> None:
+        with (
+            patch.object(api, "_require_session_access"),
+            patch.object(api, "_get_db", return_value=self.ActiveDatabase()),
+            patch.object(api, "_audit"),
+            patch.object(StudentRepository, "get_session", return_value={"status": "Ended"}),
+            patch.object(StudentRepository, "update_session_review", return_value=True),
+        ):
+            result = api.submit_review(
+                "session_1",
+                api.ReviewRequest(review_mark="clear", instructor_notes="Reviewed"),
+                None,
+                {"user_id": "instructor_1", "role": "instructor", "tenant_id": "tenant_1"},
+            )
+
+        self.assertEqual(result["session_status"], "Reviewed")
+        self.assertFalse(result["idempotent_replay"])
 
 
 class AnswerPrivacyTests(unittest.TestCase):
