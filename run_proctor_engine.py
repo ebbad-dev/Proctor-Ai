@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -305,19 +306,31 @@ class ProctorEngine:
             "event_type": event_type,
             "risk_points": BASE_POINTS.get(event_type, 0),
             "notes": notes,
+            "ingest_id": uuid.uuid4().hex,
         }
-        try:
-            response = requests.post(
-                f"{API_BASE}/events",
-                json=payload,
-                headers={"X-Proctor-Device-Secret": PROCTOR_DEVICE_SECRET},
-                timeout=2,
-            )
-            response.raise_for_status()
-            if self.last_error.startswith("event post failed:"):
-                self.last_error = ""
-        except Exception as exc:
-            self.last_error = f"event post failed: {exc}"
+        last_error: Exception | None = None
+        for attempt, delay in enumerate((0.0, 0.25, 0.75), start=1):
+            if delay:
+                time.sleep(delay)
+            try:
+                response = requests.post(
+                    f"{API_BASE}/events",
+                    json=payload,
+                    headers={"X-Proctor-Device-Secret": PROCTOR_DEVICE_SECRET},
+                    timeout=2,
+                )
+                response.raise_for_status()
+                result = response.json()
+                if result.get("persistence") != "persisted":
+                    raise RuntimeError("API did not confirm event persistence")
+                if self.last_error.startswith("event post failed:"):
+                    self.last_error = ""
+                return
+            except Exception as exc:
+                last_error = exc
+                if attempt == 3:
+                    break
+        self.last_error = f"event post failed after 3 attempts: {last_error}"
 
     def _write_status(self) -> None:
         status = self.status()

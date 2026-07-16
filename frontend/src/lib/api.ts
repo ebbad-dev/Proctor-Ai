@@ -344,7 +344,24 @@ export const api = {
   },
 
   async postBrowserSignal(endpoint: string, payload: Record<string, unknown>): Promise<void> {
-    await http(endpoint, { method: "POST", body: JSON.stringify(payload) }).catch(() => undefined);
+    const ingestId = typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const body = JSON.stringify({ ...payload, ingest_id: payload.ingest_id || ingestId });
+    let lastError: unknown;
+    for (const delay of [0, 250, 750]) {
+      if (delay) await new Promise((resolveDelay) => window.setTimeout(resolveDelay, delay));
+      try {
+        const result = await http<{ persistence?: string }>(endpoint, { method: "POST", body });
+        if (result.persistence && result.persistence !== "persisted") {
+          throw new Error("Browser event persistence was not confirmed.");
+        }
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("Browser event failed after 3 attempts.");
   },
 
   async checkCameraStream(source: "primary" | "secondary" = "primary"): Promise<boolean> {

@@ -122,6 +122,142 @@ class BrowserActivityPersistenceTests(unittest.TestCase):
         self.assertEqual(row["time"], "10:00:00")
 
 
+class PersistenceHonestyTests(unittest.TestCase):
+    class ActiveDatabase:
+        is_active = True
+
+    def setUp(self) -> None:
+        api._events.clear()
+        api._browser_events.clear()
+        api._session_meta.clear()
+        api._session_store.clear()
+
+    def test_ingest_key_is_stable_and_session_bound(self) -> None:
+        first = api._ingest_key("session_1", "client-event-1", "risk_event")
+        retry = api._ingest_key("session_1", "client-event-1", "risk_event")
+        another_session = api._ingest_key("session_2", "client-event-1", "risk_event")
+
+        self.assertEqual(first, retry)
+        self.assertNotEqual(first, another_session)
+        self.assertEqual(len(first), 64)
+
+    def test_duplicate_event_is_acknowledged_without_memory_duplication(self) -> None:
+        with (
+            patch.object(api, "_get_db", return_value=self.ActiveDatabase()),
+            patch.object(StudentRepository, "event_ingest_exists", return_value=True),
+        ):
+            result = api._persist_event(
+                "session_1",
+                "student_1",
+                "Face Missing",
+                8,
+                "No face",
+                {"ingest_id": "client-event-1"},
+            )
+
+        self.assertTrue(result["duplicate"])
+        self.assertEqual(result["persistence"], "persisted")
+        self.assertEqual(api._events, [])
+
+    def test_failed_event_write_returns_503_without_phantom_event(self) -> None:
+        with (
+            patch.object(api, "_get_db", return_value=self.ActiveDatabase()),
+            patch.object(StudentRepository, "event_ingest_exists", return_value=False),
+            patch.object(StudentRepository, "upsert_session", side_effect=RuntimeError("write failed")),
+        ):
+            with self.assertRaises(api.HTTPException) as raised:
+                api._persist_event(
+                    "session_1",
+                    "student_1",
+                    "Face Missing",
+                    8,
+                    "No face",
+                    {"ingest_id": "client-event-1"},
+                )
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(api._events, [])
+
+    def test_duplicate_browser_activity_is_acknowledged_without_memory_duplication(self) -> None:
+        with (
+            patch.object(api, "_get_db", return_value=self.ActiveDatabase()),
+            patch.object(StudentRepository, "browser_activity_ingest_exists", return_value=True),
+        ):
+            result = api._record_browser_activity(
+                "tab_switch",
+                session_id="session_1",
+                risk="medium",
+                ingest_id="client-browser-1",
+            )
+
+        self.assertTrue(result["duplicate"])
+        self.assertEqual(result["persistence"], "persisted")
+        self.assertEqual(api._browser_events, [])
+
+    def test_failed_browser_write_returns_503_without_phantom_activity(self) -> None:
+        with (
+            patch.object(api, "_get_db", return_value=self.ActiveDatabase()),
+            patch.object(StudentRepository, "browser_activity_ingest_exists", return_value=False),
+            patch.object(StudentRepository, "insert_browser_activity", side_effect=RuntimeError("write failed")),
+        ):
+            with self.assertRaises(api.HTTPException) as raised:
+                api._record_browser_activity(
+                    "tab_switch",
+                    session_id="session_1",
+                    risk="medium",
+                    ingest_id="client-browser-1",
+                )
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(api._browser_events, [])
+
+    def test_failed_session_start_does_not_create_memory_state(self) -> None:
+        with (
+            patch.object(api, "_get_db", return_value=self.ActiveDatabase()),
+            patch.object(StudentRepository, "upsert_session", side_effect=RuntimeError("write failed")),
+        ):
+            with self.assertRaises(api.HTTPException) as raised:
+                api.start_session(
+                    api.SessionMeta(session_id="session_fail", student_id="student_1"),
+                    None,
+                    {"user_id": "student_1", "role": "student", "tenant_id": "tenant_1"},
+                )
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertNotIn("session_fail", api._session_store)
+        self.assertEqual(api._session_meta, {})
+
+    def test_proctor_retry_reuses_the_same_ingest_id(self) -> None:
+        import run_proctor_engine
+
+        class SuccessfulResponse:
+            @staticmethod
+            def raise_for_status() -> None:
+                return None
+
+            @staticmethod
+            def json() -> dict:
+                return {"persistence": "persisted", "duplicate": False}
+
+        engine = object.__new__(run_proctor_engine.ProctorEngine)
+        engine.session = {"session_id": "session_1", "student_id": "student_1"}
+        engine.last_error = ""
+        with (
+            patch.object(
+                run_proctor_engine.requests,
+                "post",
+                side_effect=[RuntimeError("temporary"), RuntimeError("temporary"), SuccessfulResponse()],
+            ) as post,
+            patch.object(run_proctor_engine.time, "sleep"),
+        ):
+            engine._post_event("Face Missing", "No face")
+
+        ingest_ids = [call.kwargs["json"]["ingest_id"] for call in post.call_args_list]
+        self.assertEqual(len(post.call_args_list), 3)
+        self.assertEqual(len(set(ingest_ids)), 1)
+        self.assertEqual(engine.last_error, "")
+
+
 class AnswerPrivacyTests(unittest.TestCase):
     def test_student_response_omits_grading_fields(self) -> None:
         response = {
@@ -308,7 +444,11 @@ class EndpointProtectionTests(unittest.TestCase):
             "status": "Active",
         }
 
-        with patch.object(api, "_persist_event") as persist:
+        with patch.object(
+            api,
+            "_persist_event",
+            return_value={"persistence": "persisted", "duplicate": False},
+        ) as persist:
             response = self.client.post(
                 "/events",
                 headers={"X-Proctor-Device-Secret": PROCTOR_DEVICE_SECRET},

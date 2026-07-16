@@ -112,6 +112,8 @@ The platform logs real browser fallback events, Browser Guard exact URL/tab even
 
 Browser signals are accepted only from the authenticated student exam client, a short-lived extension token bound to the active session, or the trusted local companion. The Python sidecar signs AI event posts with the proctor device credential. Heartbeats update connectivity only and never add risk points.
 
+Scored monitoring events are acknowledged only after SQL persistence. Producers retry transient failures with a stable, session-bound ingestion ID, and filtered unique indexes prevent a retry from duplicating browser activity or risk points.
+
 ## Test And Verification
 
 ```powershell

@@ -267,6 +267,7 @@ class DatabaseConnection:
                 detection_class NVARCHAR(128) NULL,
                 bounding_box_json NVARCHAR(MAX) NULL,
                 evidence_id NVARCHAR(64) NULL,
+                ingest_id NVARCHAR(64) NULL,
                 notes NVARCHAR(MAX) NULL
             )
             """
@@ -277,6 +278,7 @@ class DatabaseConnection:
             ("detection_class", "NVARCHAR(128) NULL"),
             ("bounding_box_json", "NVARCHAR(MAX) NULL"),
             ("evidence_id", "NVARCHAR(64) NULL"),
+            ("ingest_id", "NVARCHAR(64) NULL"),
         ):
             self.execute(
                 f"""
@@ -284,6 +286,16 @@ class DatabaseConnection:
                 ALTER TABLE Events ADD {column} {definition}
                 """
             )
+        self.execute(
+            """
+            IF COL_LENGTH('Events', 'session_id') < 256
+            BEGIN
+                IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Events_SessionTime' AND object_id = OBJECT_ID('Events'))
+                    DROP INDEX IX_Events_SessionTime ON Events;
+                ALTER TABLE Events ALTER COLUMN session_id NVARCHAR(128) NOT NULL;
+            END
+            """
+        )
         self.execute(
             """
             IF OBJECT_ID('BrowserActivity', 'U') IS NULL
@@ -298,8 +310,15 @@ class DatabaseConnection:
                 risk_level NVARCHAR(16) NOT NULL DEFAULT 'low',
                 risk_points INT NOT NULL DEFAULT 0,
                 source NVARCHAR(64) NULL,
+                ingest_id NVARCHAR(64) NULL,
                 event_time DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
             )
+            """
+        )
+        self.execute(
+            """
+            IF COL_LENGTH('BrowserActivity', 'ingest_id') IS NULL
+            ALTER TABLE BrowserActivity ADD ingest_id NVARCHAR(64) NULL
             """
         )
         self.execute(
@@ -396,7 +415,9 @@ class DatabaseConnection:
             "IX_StudentResponses_Attempt": "CREATE INDEX IX_StudentResponses_Attempt ON StudentResponses(tenant_id, attempt_id, question_id)",
             "IX_Sessions_UserExam": "CREATE INDEX IX_Sessions_UserExam ON Sessions(tenant_id, user_id, exam_id)",
             "IX_Events_SessionTime": "CREATE INDEX IX_Events_SessionTime ON Events(tenant_id, session_id, event_time)",
+            "UX_Events_IngestId": "CREATE UNIQUE INDEX UX_Events_IngestId ON Events(ingest_id) WHERE ingest_id IS NOT NULL",
             "IX_BrowserActivity_SessionTime": "CREATE INDEX IX_BrowserActivity_SessionTime ON BrowserActivity(tenant_id, session_id, event_time)",
+            "UX_BrowserActivity_IngestId": "CREATE UNIQUE INDEX UX_BrowserActivity_IngestId ON BrowserActivity(ingest_id) WHERE ingest_id IS NOT NULL",
             "IX_Evidence_Session": "CREATE INDEX IX_Evidence_Session ON Evidence(tenant_id, session_id, created_at)",
             "IX_AuditLogs_TenantTime": "CREATE INDEX IX_AuditLogs_TenantTime ON AuditLogs(tenant_id, created_at DESC)",
             "IX_AuditLogs_ActorTime": "CREATE INDEX IX_AuditLogs_ActorTime ON AuditLogs(actor_user_id, created_at DESC)",

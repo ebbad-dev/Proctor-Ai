@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 
 const API_BASE = process.env.VITE_API_BASE_URL || process.env.API_BASE_URL || "http://127.0.0.1:5051";
@@ -50,19 +50,34 @@ async function ping() {
 
 async function postEvent(target, type) {
   const { category, risk } = classifyUrl(target.url || "");
-  await fetch(`${API_BASE}/browser-events`, {
-    method: "POST",
-    headers: deviceHeaders(true),
-    body: JSON.stringify({
-      type,
-      url: target.url || "",
-      title: target.title || "",
-      category,
-      risk,
-      source: "browser_guard_companion",
-      version: VERSION,
-    }),
-  }).catch(() => {});
+  const body = JSON.stringify({
+    type,
+    url: target.url || "",
+    title: target.title || "",
+    category,
+    risk,
+    source: "browser_guard_companion",
+    version: VERSION,
+    ingest_id: randomUUID(),
+  });
+  let lastError;
+  for (const delay of [0, 250, 750]) {
+    if (delay) await new Promise((resolveDelay) => setTimeout(resolveDelay, delay));
+    try {
+      const response = await fetch(`${API_BASE}/browser-events`, {
+        method: "POST",
+        headers: deviceHeaders(true),
+        body,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result = await response.json();
+      if (result.persistence !== "persisted") throw new Error("persistence was not confirmed");
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  console.warn("ProctorAI Browser Guard event failed after 3 attempts", lastError);
 }
 
 async function pollTabs(state) {

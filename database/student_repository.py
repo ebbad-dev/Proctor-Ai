@@ -84,15 +84,16 @@ class StudentRepository:
         detection_class: str = "",
         bounding_box_json: str = "",
         evidence_id: str = "",
+        ingest_id: str = "",
     ) -> None:
         tenant_id = tenant_id or self._tenant_for_session(session_id)
         self.db.execute(
             """
             INSERT INTO Events (
                 tenant_id, session_id, student_id, event_type, event_time, risk_points,
-                confidence, model_name, detection_class, bounding_box_json, evidence_id, notes
+                confidence, model_name, detection_class, bounding_box_json, evidence_id, ingest_id, notes
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 tenant_id,
@@ -106,9 +107,16 @@ class StudentRepository:
                 detection_class,
                 bounding_box_json,
                 evidence_id,
+                ingest_id or None,
                 notes,
             ),
         )
+
+    def event_ingest_exists(self, ingest_id: str) -> bool:
+        if not ingest_id:
+            return False
+        rows = self.db.query("SELECT TOP 1 1 AS found FROM Events WHERE ingest_id = ?", (ingest_id,))
+        return bool(rows)
 
     def insert_browser_activity(
         self,
@@ -122,6 +130,7 @@ class StudentRepository:
         risk_level: str = "low",
         risk_points: int = 0,
         source: str = "",
+        ingest_id: str = "",
         tenant_id: str = "",
     ) -> None:
         tenant_id = tenant_id or self._tenant_for_session(session_id)
@@ -129,9 +138,9 @@ class StudentRepository:
             """
             INSERT INTO BrowserActivity (
                 tenant_id, session_id, activity_type, url, title, category,
-                risk_level, risk_points, source, event_time
+                risk_level, risk_points, source, ingest_id, event_time
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 tenant_id,
@@ -143,15 +152,22 @@ class StudentRepository:
                 risk_level,
                 int(risk_points or 0),
                 source,
+                ingest_id or None,
                 event_time,
             ),
         )
+
+    def browser_activity_ingest_exists(self, ingest_id: str) -> bool:
+        if not ingest_id:
+            return False
+        rows = self.db.query("SELECT TOP 1 1 AS found FROM BrowserActivity WHERE ingest_id = ?", (ingest_id,))
+        return bool(rows)
 
     def get_browser_activity(self, session_id: str) -> list[dict]:
         return self.db.query(
             """
             SELECT activity_id, tenant_id, session_id, activity_type, url, title,
-                   category, risk_level, risk_points, source, event_time
+                   category, risk_level, risk_points, source, ingest_id, event_time
             FROM BrowserActivity
             WHERE session_id = ?
             ORDER BY event_time ASC, activity_id ASC

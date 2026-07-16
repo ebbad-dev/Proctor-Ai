@@ -9,16 +9,36 @@ chrome.storage.session.get(["proctoraiSessionToken", "proctoraiSessionId"], (val
   if (sessionToken) heartbeat();
 });
 
-function postJson(path, payload) {
+async function postJson(path, payload) {
   if (!sessionToken) return;
-  fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Proctor-Session-Token": sessionToken,
-    },
-    body: JSON.stringify({ ...payload, session_id: sessionId }),
-  }).catch((error) => console.warn("ProctorAI Browser Guard request failed", error));
+  const body = JSON.stringify({
+    ...payload,
+    session_id: sessionId,
+    ingest_id: payload.ingest_id || crypto.randomUUID(),
+  });
+  let lastError;
+  for (const delay of [0, 250, 750]) {
+    if (delay) await new Promise((resolveDelay) => setTimeout(resolveDelay, delay));
+    try {
+      const response = await fetch(`${API_BASE}${path}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Proctor-Session-Token": sessionToken,
+        },
+        body,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result = await response.json();
+      if (result.persistence && result.persistence !== "persisted") {
+        throw new Error("persistence was not confirmed");
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  console.warn("ProctorAI Browser Guard request failed after 3 attempts", lastError);
 }
 
 function ping() {

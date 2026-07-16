@@ -18,8 +18,12 @@ batch.
 ## Batch 2: persistence honesty and retry safety
 
 - Remove silent exception swallowing from session and event writes.
-- Make ingestion acknowledgements distinguish persisted, queued, and rejected data.
-- Add idempotency keys and bounded retry behavior for proctor/browser event producers.
+- Acknowledge only SQL-persisted monitoring events; return retryable 503 responses on
+  write failures without creating phantom in-memory rows.
+- Use session-bound ingestion IDs plus filtered unique SQL indexes to make retries
+  duplicate-safe.
+- Retry with the same ID in the proctor engine, Browser Guard companion/extension,
+  and React exam fallback.
 
 ## Batch 3: session lifecycle integrity
 

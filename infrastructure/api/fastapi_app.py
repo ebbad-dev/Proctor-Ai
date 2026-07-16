@@ -136,6 +136,7 @@ if _FASTAPI_AVAILABLE:
         session_id: Optional[str] = None
         source: str = "browser_guard"
         version: str = ""
+        ingest_id: str = ""
 
     class BrowserGuardTokenRequest(BaseModel):
         session_id: str
@@ -151,6 +152,7 @@ if _FASTAPI_AVAILABLE:
         detection_class: str = ""
         bounding_box: Optional[dict] = None
         evidence_id: str = ""
+        ingest_id: str = ""
 
     class SessionMeta(BaseModel):
         session_id:   str = ""
@@ -173,6 +175,7 @@ if _FASTAPI_AVAILABLE:
         detection_class: Optional[str] = None
         bounding_box_json: Optional[str] = None
         evidence_id: Optional[str] = None
+        ingest_id: Optional[str] = None
         notes: str
 
     class RiskContributor(BaseModel):
@@ -204,6 +207,7 @@ if _FASTAPI_AVAILABLE:
         risk_points: Optional[int] = None
         risk_impact: Optional[int] = None
         source: Optional[str] = None
+        ingest_id: Optional[str] = None
         time: str
         timestamp: str
 
@@ -543,8 +547,16 @@ if _FASTAPI_AVAILABLE:
                 user_agent=request.headers.get("user-agent", "") if request else "",
                 details=details or {},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event(
+                _api_logger,
+                "audit.persist_failed",
+                level="error",
+                action=action,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                error=exc.__class__.__name__,
+            )
 
     def _parse_dt(value: Any) -> datetime:
         if isinstance(value, datetime):
@@ -893,7 +905,7 @@ if _FASTAPI_AVAILABLE:
         return status
 
     def _exam_payload(req: ExamRequest) -> dict:
-        data = req.dict()
+        data = req.model_dump()
         data["exam_code"] = "".join(ch for ch in (data.get("exam_code") or "").upper().strip() if ch.isalnum() or ch in "-_")
         data["title"] = (data.get("title") or "").strip()
         data["description"] = (data.get("description") or "").strip()
@@ -970,7 +982,7 @@ if _FASTAPI_AVAILABLE:
         }
 
     def _question_payload(req: ExamQuestionRequest) -> dict:
-        data = req.dict()
+        data = req.model_dump()
         data["question_text"] = (data.get("question_text") or "").strip()
         data["question_type"] = (data.get("question_type") or "mcq").strip().lower()
         if data["question_type"] != "mcq":
@@ -1207,7 +1219,7 @@ if _FASTAPI_AVAILABLE:
         text = (req.option_text or "").strip()
         if not text:
             _api_error(422, "validation_error", "Option text is required.")
-        option = repo.upsert_option(question_id, {**req.dict(), "option_text": text}, question.get("tenant_id") or _tenant_id(user))
+        option = repo.upsert_option(question_id, {**req.model_dump(), "option_text": text}, question.get("tenant_id") or _tenant_id(user))
         _audit("question.option_saved", actor=user, resource_type="question", resource_id=question_id, request=request)
         return option
 
@@ -1222,7 +1234,7 @@ if _FASTAPI_AVAILABLE:
         text = (req.option_text or "").strip()
         if not text:
             _api_error(422, "validation_error", "Option text is required.")
-        option = repo.upsert_option(question_id, {**req.dict(), "option_text": text}, question.get("tenant_id") or _tenant_id(user), option_id)
+        option = repo.upsert_option(question_id, {**req.model_dump(), "option_text": text}, question.get("tenant_id") or _tenant_id(user), option_id)
         _audit("question.option_saved", actor=user, resource_type="option", resource_id=option_id, request=request)
         return option
 
@@ -1740,6 +1752,7 @@ if _FASTAPI_AVAILABLE:
             "detection_class": row.get("detection_class") or "",
             "bounding_box_json": row.get("bounding_box_json") or "",
             "evidence_id": row.get("evidence_id") or "",
+            "ingest_id": row.get("ingest_id") or "",
             "notes": row.get("notes") or row.get("Notes") or "",
         }
 
@@ -1830,7 +1843,7 @@ if _FASTAPI_AVAILABLE:
             try:
                 rows = db.query(
                     "SELECT event_id, session_id, student_id, event_type, event_time, risk_points, "
-                    "confidence, model_name, detection_class, bounding_box_json, evidence_id, notes "
+                    "confidence, model_name, detection_class, bounding_box_json, evidence_id, ingest_id, notes "
                     "FROM Events WHERE session_id = ? ORDER BY event_time ASC",
                     (session_id,)
                 )
@@ -1860,6 +1873,7 @@ if _FASTAPI_AVAILABLE:
             "risk_points": points,
             "risk_impact": points,
             "source": str(row.get("source") or ""),
+            "ingest_id": str(row.get("ingest_id") or ""),
             "time": timestamp[11:19] if len(timestamp) >= 19 else timestamp,
             "timestamp": timestamp,
         }
@@ -1992,6 +2006,10 @@ if _FASTAPI_AVAILABLE:
         meta = _session_store.get(session_id or active, {})
         return str(meta.get("student_id") or _session_meta.get("student_id") or "")
 
+    def _ingest_key(session_id: str, ingest_id: str, purpose: str) -> str:
+        client_key = (ingest_id or uuid.uuid4().hex).strip()
+        return hashlib.sha256(f"{session_id}:{purpose}:{client_key}".encode("utf-8")).hexdigest()
+
     def _persist_event(
         session_id: str,
         student_id: str,
@@ -2001,8 +2019,10 @@ if _FASTAPI_AVAILABLE:
         metadata: dict | None = None,
     ) -> dict:
         metadata = metadata or {}
-        _ensure_fallback_session(session_id, student_id)
-        event_time = datetime.now()
+        if not session_id:
+            _api_error(422, "session_required", "A session ID is required for event persistence.")
+        ingest_id = _ingest_key(session_id, str(metadata.get("ingest_id") or ""), "risk_event")
+        event_time = datetime.now(timezone.utc)
         record = {
             "session_id": session_id,
             "student_id": student_id,
@@ -2013,39 +2033,56 @@ if _FASTAPI_AVAILABLE:
             "detection_class": metadata.get("detection_class") or "",
             "bounding_box_json": json.dumps(metadata.get("bounding_box") or metadata.get("bounding_box_json") or {}),
             "evidence_id": metadata.get("evidence_id") or "",
+            "ingest_id": ingest_id,
             "notes": notes,
             "time": event_time.strftime("%H:%M:%S"),
-            "timestamp": event_time.isoformat(),
-            "event_time": event_time.isoformat(),
+            "timestamp": event_time.isoformat().replace("+00:00", "Z"),
+            "event_time": event_time.isoformat().replace("+00:00", "Z"),
+            "persistence": "persisted",
+            "duplicate": False,
         }
-        _events.append(record)
-        if session_id:
-            db = _get_db()
-            if db and db.is_active:
-                try:
-                    from database.student_repository import StudentRepository
+        db = _get_db()
+        if not db or not db.is_active:
+            _api_error(503, "database_unavailable", "Event persistence is unavailable. Retry the event.")
+        from database.student_repository import StudentRepository
 
-                    repo = StudentRepository(db)
-                    repo.upsert_session(
-                        session_id,
-                        student_id=student_id,
-                        status="Active",
-                    )
-                    repo.insert_event(
-                        session_id,
-                        student_id,
-                        event_type,
-                        event_time,
-                        int(risk_points or 0),
-                        notes,
-                        confidence=metadata.get("confidence"),
-                        model_name=str(metadata.get("model_name") or ""),
-                        detection_class=str(metadata.get("detection_class") or ""),
-                        bounding_box_json=json.dumps(metadata.get("bounding_box") or metadata.get("bounding_box_json") or {}),
-                        evidence_id=str(metadata.get("evidence_id") or ""),
-                    )
-                except Exception:
-                    pass
+        repo = StudentRepository(db)
+        try:
+            if repo.event_ingest_exists(ingest_id):
+                return {**record, "duplicate": True}
+            repo.upsert_session(session_id, student_id=student_id, status="Active")
+            repo.insert_event(
+                session_id,
+                student_id,
+                event_type,
+                event_time,
+                int(risk_points or 0),
+                notes,
+                confidence=metadata.get("confidence"),
+                model_name=str(metadata.get("model_name") or ""),
+                detection_class=str(metadata.get("detection_class") or ""),
+                bounding_box_json=json.dumps(metadata.get("bounding_box") or metadata.get("bounding_box_json") or {}),
+                evidence_id=str(metadata.get("evidence_id") or ""),
+                ingest_id=ingest_id,
+            )
+        except Exception as exc:
+            try:
+                duplicate = repo.event_ingest_exists(ingest_id)
+            except Exception:
+                duplicate = False
+            if duplicate:
+                return {**record, "duplicate": True}
+            log_event(
+                _api_logger,
+                "event.persist_failed",
+                level="error",
+                session_id=session_id,
+                event_type=event_type,
+                error=exc.__class__.__name__,
+            )
+            _api_error(503, "event_not_persisted", "The proctor event could not be persisted. Retry the event.")
+        _ensure_fallback_session(session_id, student_id)
+        _events.append(record)
         return record
 
     def _record_browser_activity(
@@ -2057,11 +2094,14 @@ if _FASTAPI_AVAILABLE:
         category: str = "Unknown",
         risk: str = "low",
         source: str = "browser_client",
+        ingest_id: str = "",
     ) -> dict:
         risk_points = _browser_risk_points(risk)
         event_time = datetime.now(timezone.utc)
+        resolved_session_id = session_id or _active_session_id()
+        resolved_ingest_id = _ingest_key(resolved_session_id, ingest_id, "browser_activity")
         record = {
-            "session_id": session_id or _active_session_id(),
+            "session_id": resolved_session_id,
             "type": event_type,
             "url": url,
             "title": title,
@@ -2070,37 +2110,52 @@ if _FASTAPI_AVAILABLE:
             "risk_points": risk_points,
             "risk_impact": risk_points,
             "source": source,
+            "ingest_id": resolved_ingest_id,
             "time": event_time.strftime("%H:%M:%S"),
             "timestamp": event_time.isoformat().replace("+00:00", "Z"),
+            "persistence": "persisted",
+            "duplicate": False,
         }
-        _browser_events.append(record)
-        if record["session_id"]:
-            db = _get_db()
-            if db and db.is_active:
-                try:
-                    from database.student_repository import StudentRepository
+        if not resolved_session_id:
+            _api_error(422, "session_required", "A session ID is required for browser activity.")
+        db = _get_db()
+        if not db or not db.is_active:
+            _api_error(503, "database_unavailable", "Browser activity persistence is unavailable. Retry the event.")
+        from database.student_repository import StudentRepository
 
-                    StudentRepository(db).insert_browser_activity(
-                        record["session_id"],
-                        event_type,
-                        event_time,
-                        url=url,
-                        title=title,
-                        category=category,
-                        risk_level=risk,
-                        risk_points=risk_points,
-                        source=source,
-                    )
-                except Exception as exc:
-                    log_event(
-                        _api_logger,
-                        "browser_activity.persist_failed",
-                        level="error",
-                        session_id=record["session_id"],
-                        activity_type=event_type,
-                        error=exc.__class__.__name__,
-                    )
-                    _api_error(503, "browser_activity_not_persisted", "Browser activity could not be persisted. Retry the event.")
+        repo = StudentRepository(db)
+        try:
+            if repo.browser_activity_ingest_exists(resolved_ingest_id):
+                return {**record, "duplicate": True}
+            repo.insert_browser_activity(
+                resolved_session_id,
+                event_type,
+                event_time,
+                url=url,
+                title=title,
+                category=category,
+                risk_level=risk,
+                risk_points=risk_points,
+                source=source,
+                ingest_id=resolved_ingest_id,
+            )
+        except Exception as exc:
+            try:
+                duplicate = repo.browser_activity_ingest_exists(resolved_ingest_id)
+            except Exception:
+                duplicate = False
+            if duplicate:
+                return {**record, "duplicate": True}
+            log_event(
+                _api_logger,
+                "browser_activity.persist_failed",
+                level="error",
+                session_id=resolved_session_id,
+                activity_type=event_type,
+                error=exc.__class__.__name__,
+            )
+            _api_error(503, "browser_activity_not_persisted", "Browser activity could not be persisted. Retry the event.")
+        _browser_events.append(record)
         return record
 
     def _record_browser_risk_event(
@@ -2109,17 +2164,19 @@ if _FASTAPI_AVAILABLE:
         canonical_event: str,
         notes: str,
         risk: str = "low",
-    ) -> None:
+        ingest_id: str = "",
+    ) -> dict | None:
         sid = session_id or _active_session_id()
         if not sid:
-            return
+            return None
         points = _base_points(canonical_event, _browser_risk_points(risk))
-        _persist_event(
+        return _persist_event(
             sid,
             _active_student_id(sid),
             canonical_event,
             points,
             notes,
+            {"ingest_id": ingest_id},
         )
 
     def _write_active_proctor_state(running: bool, session_id: str = "", student_id: str = "", exam_code: str = ""):
@@ -2190,7 +2247,7 @@ if _FASTAPI_AVAILABLE:
         if trusted_guard and ev.source in {"extension", "browser_guard_extension", "browser_guard_companion"}:
             _guard_last_seen = time.monotonic()
         if not _browser_event_should_score(ev.type):
-            return {"status": "ok", "total": len(_browser_events), "scored": False}
+            return {"status": "ok", "total": len(_browser_events), "scored": False, "persistence": "not_applicable"}
         record = _record_browser_activity(
             ev.type,
             session_id=session_id,
@@ -2199,21 +2256,29 @@ if _FASTAPI_AVAILABLE:
             category=ev.category,
             risk=ev.risk,
             source=ev.source,
+            ingest_id=ev.ingest_id,
         )
         from core.events.event_types import EVENT_BROWSER_ACTIVITY, EVENT_TAB_SWITCH
 
         canonical = EVENT_TAB_SWITCH if ev.type == "tab_switch" else EVENT_BROWSER_ACTIVITY
-        _record_browser_risk_event(
+        risk_record = _record_browser_risk_event(
             session_id,
             ev.type,
             canonical,
             f"{ev.type}: {ev.title or ev.url or ev.category}",
             risk=ev.risk,
+            ingest_id=ev.ingest_id,
         )
         det = _get_detector()
         if det:
             det.bridge_browser_guard_event(ev.type, ev.url, ev.title, ev.category, ev.risk)
-        return {"status": "ok", "total": len(_browser_events), "scored": True}
+        return {
+            "status": "ok",
+            "total": len(_browser_events),
+            "scored": True,
+            "persistence": "persisted",
+            "duplicate": bool(record.get("duplicate") and (risk_record or {}).get("duplicate")),
+        }
 
     @app.post("/browser-guard/token")
     def create_browser_guard_session_token(
@@ -2266,10 +2331,12 @@ if _FASTAPI_AVAILABLE:
     class KeyEvent(BaseModel):
         combo: str = "unknown"
         session_id: Optional[str] = None
+        ingest_id: str = ""
 
     class ClipboardEvent(BaseModel):
         action: str = "copy"
         session_id: Optional[str] = None
+        ingest_id: str = ""
 
     @app.post("/keyboard-event")
     def keyboard_event(ev: KeyEvent, principal: dict = Depends(_browser_signal_principal)):
@@ -2280,19 +2347,21 @@ if _FASTAPI_AVAILABLE:
             title=f"Shortcut: {ev.combo}",
             category="Keyboard",
             risk="medium",
+            ingest_id=ev.ingest_id,
         )
         from core.events.event_types import EVENT_KEYBOARD_SHORTCUT
-        _record_browser_risk_event(
+        risk_record = _record_browser_risk_event(
             record.get("session_id", ""),
             "keyboard",
             EVENT_KEYBOARD_SHORTCUT,
             f"Keyboard shortcut: {ev.combo}",
             risk="medium",
+            ingest_id=ev.ingest_id,
         )
         det = _get_detector()
         if det:
             det.bridge_extension_key_event(ev.combo)
-        return {"status": "ok"}
+        return {"status": "ok", "persistence": "persisted", "duplicate": bool(record.get("duplicate") and (risk_record or {}).get("duplicate"))}
 
     @app.post("/key-event")
     def key_event_alias(ev: KeyEvent, principal: dict = Depends(_browser_signal_principal)):
@@ -2308,31 +2377,36 @@ if _FASTAPI_AVAILABLE:
             title=f"Clipboard {ev.action}",
             category="Clipboard",
             risk="medium",
+            ingest_id=ev.ingest_id,
         )
         from core.events.event_types import EVENT_CLIPBOARD_ACCESS
-        _record_browser_risk_event(
+        risk_record = _record_browser_risk_event(
             record.get("session_id", ""),
             ev.action,
             EVENT_CLIPBOARD_ACCESS,
             f"Clipboard {ev.action}",
             risk="medium",
+            ingest_id=ev.ingest_id,
         )
         det = _get_detector()
         if det:
             det.bridge_extension_clipboard_event(ev.action)
-        return {"status": "ok"}
+        return {"status": "ok", "persistence": "persisted", "duplicate": bool(record.get("duplicate") and (risk_record or {}).get("duplicate"))}
 
     class TabEvent(BaseModel):
         direction: str = "away"
         session_id: Optional[str] = None
+        ingest_id: str = ""
 
     class DevToolsEvent(BaseModel):
         state: str = "open"
         session_id: Optional[str] = None
+        ingest_id: str = ""
 
     class FullscreenEvent(BaseModel):
         state: str = "exit"
         session_id: Optional[str] = None
+        ingest_id: str = ""
 
     @app.post("/tab-event")
     def tab_event(ev: TabEvent, principal: dict = Depends(_browser_signal_principal)):
@@ -2344,19 +2418,28 @@ if _FASTAPI_AVAILABLE:
                 title="Left exam tab",
                 category="Tab",
                 risk="medium",
+                ingest_id=ev.ingest_id,
             )
             from core.events.event_types import EVENT_TAB_SWITCH
-            _record_browser_risk_event(
+            risk_record = _record_browser_risk_event(
                 record.get("session_id", ""),
                 "tab_switch",
                 EVENT_TAB_SWITCH,
                 "Left exam tab or browser window lost focus",
                 risk="medium",
+                ingest_id=ev.ingest_id,
             )
+        else:
+            record = None
+            risk_record = None
         det = _get_detector()
         if det:
             det.bridge_tab_event(ev.direction)
-        return {"status": "ok"}
+        return {
+            "status": "ok",
+            "persistence": "persisted" if record else "not_applicable",
+            "duplicate": bool(record and record.get("duplicate") and (risk_record or {}).get("duplicate")),
+        }
 
     @app.post("/devtools-event")
     def devtools_event(ev: DevToolsEvent, principal: dict = Depends(_browser_signal_principal)):
@@ -2368,19 +2451,28 @@ if _FASTAPI_AVAILABLE:
                 title="DevTools opened",
                 category="DevTools",
                 risk="high",
+                ingest_id=ev.ingest_id,
             )
             from core.events.event_types import EVENT_DEVTOOLS_OPENED
-            _record_browser_risk_event(
+            risk_record = _record_browser_risk_event(
                 record.get("session_id", ""),
                 "devtools",
                 EVENT_DEVTOOLS_OPENED,
                 "DevTools opened",
                 risk="high",
+                ingest_id=ev.ingest_id,
             )
+        else:
+            record = None
+            risk_record = None
         det = _get_detector()
         if det:
             det.bridge_devtools_event(ev.state)
-        return {"status": "ok"}
+        return {
+            "status": "ok",
+            "persistence": "persisted" if record else "not_applicable",
+            "duplicate": bool(record and record.get("duplicate") and (risk_record or {}).get("duplicate")),
+        }
 
     @app.post("/fullscreen-event")
     def fullscreen_event(ev: FullscreenEvent, principal: dict = Depends(_browser_signal_principal)):
@@ -2393,19 +2485,28 @@ if _FASTAPI_AVAILABLE:
                 title="Exited fullscreen",
                 category="Fullscreen",
                 risk="medium",
+                ingest_id=ev.ingest_id,
             )
             from core.events.event_types import EVENT_FULLSCREEN_EXIT
-            _record_browser_risk_event(
+            risk_record = _record_browser_risk_event(
                 record.get("session_id", ""),
                 "fullscreen_exit",
                 EVENT_FULLSCREEN_EXIT,
                 "Exited fullscreen mode",
                 risk="medium",
+                ingest_id=ev.ingest_id,
             )
+        else:
+            record = None
+            risk_record = None
         det = _get_detector()
         if det:
             det.bridge_fullscreen_event(normalized_state)
-        return {"status": "ok"}
+        return {
+            "status": "ok",
+            "persistence": "persisted" if record else "not_applicable",
+            "duplicate": bool(record and record.get("duplicate") and (risk_record or {}).get("duplicate")),
+        }
 
     # ── Proctor Events ────────────────────────────────────────
 
@@ -2414,7 +2515,7 @@ if _FASTAPI_AVAILABLE:
         active_session_id = _active_session_id()
         if not active_session_id or ev.session_id != active_session_id:
             _api_error(409, "session_not_active", "Proctor events are accepted only for the active session.")
-        _persist_event(
+        record = _persist_event(
             ev.session_id,
             _active_student_id(ev.session_id),
             ev.event_type,
@@ -2426,9 +2527,15 @@ if _FASTAPI_AVAILABLE:
                 "detection_class": ev.detection_class,
                 "bounding_box": ev.bounding_box,
                 "evidence_id": ev.evidence_id,
+                "ingest_id": ev.ingest_id,
             },
         )
-        return {"status": "ok", "total": len(_events)}
+        return {
+            "status": "ok",
+            "total": len(_events),
+            "persistence": record.get("persistence"),
+            "duplicate": bool(record.get("duplicate")),
+        }
 
     # ── Session ───────────────────────────────────────────────
 
@@ -2436,15 +2543,43 @@ if _FASTAPI_AVAILABLE:
     def start_session(meta: SessionMeta, request: Request, user: dict = Depends(_current_user)):
         from core.security import new_id
         session_id = meta.session_id or new_id("session")
-        meta_data = meta.dict()
+        meta_data = meta.model_dump()
         meta_data["session_id"] = session_id
         if user["role"] == "student" and meta.exam_id:
             repo = _repo()
             if not repo.exam_assigned_to_student(meta.exam_id, user["user_id"]):
                 _api_error(403, "forbidden", "This exam is not assigned to you.")
+        db = _get_db()
+        if not db or not db.is_active:
+            _api_error(503, "database_unavailable", "Session persistence is unavailable. Retry session start.")
+        started_at = datetime.now(timezone.utc)
+        try:
+            from database.student_repository import StudentRepository
+
+            StudentRepository(db).upsert_session(
+                session_id,
+                student_id=meta.student_id or user["user_id"],
+                student_name=meta.student_name or user.get("full_name", ""),
+                exam_code=meta.exam_code or meta.exam_id,
+                user_id=user["user_id"],
+                exam_id=meta.exam_id,
+                roll_number=meta.roll_number,
+                tenant_id=_tenant_id(user),
+                start_time=started_at,
+                status="Active",
+            )
+        except Exception as exc:
+            log_event(
+                _api_logger,
+                "session.persist_failed",
+                level="error",
+                session_id=session_id,
+                error=exc.__class__.__name__,
+            )
+            _api_error(503, "session_not_persisted", "The session could not be persisted. Retry session start.")
         _session_meta.update(meta_data)
         _session_meta["user_id"] = user["user_id"]
-        _session_meta["started_at"] = datetime.now().isoformat()
+        _session_meta["started_at"] = started_at.isoformat().replace("+00:00", "Z")
         _session_store[session_id] = {
             **meta_data,
             "user_id": user["user_id"],
@@ -2452,25 +2587,6 @@ if _FASTAPI_AVAILABLE:
             "status": "Active",
             "started_at": _session_meta["started_at"],
         }
-        db = _get_db()
-        if db and db.is_active:
-            try:
-                from database.student_repository import StudentRepository
-
-                StudentRepository(db).upsert_session(
-                    session_id,
-                    student_id=meta.student_id or user["user_id"],
-                    student_name=meta.student_name or user.get("full_name", ""),
-                    exam_code=meta.exam_code or meta.exam_id,
-                    user_id=user["user_id"],
-                    exam_id=meta.exam_id,
-                    roll_number=meta.roll_number,
-                    tenant_id=_tenant_id(user),
-                    start_time=datetime.now(),
-                    status="Active",
-                )
-            except Exception:
-                pass
         _write_active_proctor_state(True, session_id, meta.student_id or user["user_id"], meta.exam_code)
         _audit(
             "session.started",
@@ -2480,7 +2596,7 @@ if _FASTAPI_AVAILABLE:
             details={"exam_id": meta.exam_id, "exam_code": meta.exam_code},
             request=request,
         )
-        return {"status": "ok", "session_id": session_id}
+        return {"status": "ok", "session_id": session_id, "persistence": "persisted"}
 
     @app.post("/sessions/{session_id}/end")
     def end_session(session_id: str, req: SessionEndRequest, request: Request, user: dict = Depends(_current_user)):
@@ -2840,7 +2956,7 @@ if _FASTAPI_AVAILABLE:
         db = _get_db()
         if not db or not db.is_active:
             _ensure_fallback_session(session_id)
-            _session_reviews[session_id] = req.dict()
+            _session_reviews[session_id] = req.model_dump()
             _audit("session.reviewed", actor=user, resource_type="session", resource_id=session_id, request=request)
             return {"status": "ok", "session_id": session_id}
 
