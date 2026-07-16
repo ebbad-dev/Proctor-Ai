@@ -15,7 +15,6 @@ import hmac
 import os
 import json
 import secrets
-import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -37,8 +36,9 @@ except Exception as exc:
     _FASTAPI_IMPORT_ERROR = exc
 
 if _FASTAPI_AVAILABLE:
-    from config.settings import APP_ENV, LOG_LEVEL, LOGS_DIR, REQUEST_LOGGING
+    from config.settings import LOG_LEVEL, LOGS_DIR, REQUEST_LOGGING
     from core.observability import configure_logging, log_event, request_id_var
+    from core.version import APP_VERSION
 
     _app_started_at = time.time()
     _api_logger = configure_logging(LOGS_DIR, LOG_LEVEL)
@@ -46,7 +46,7 @@ if _FASTAPI_AVAILABLE:
     app = FastAPI(
         title="ProctorAI Backend API",
         description="Receives browser guard events, provides session and event data.",
-        version="1.0.0",
+        version=APP_VERSION,
     )
 
     app.add_middleware(
@@ -121,11 +121,6 @@ if _FASTAPI_AVAILABLE:
     _session_reviews: dict[str, dict] = {}
 
     # ── Models ────────────────────────────────────────────────
-
-    class HealthResponse(BaseModel):
-        status: str
-        service: str
-        version: str
 
     class BrowserGuardEvent(BaseModel):
         type:     str
@@ -655,52 +650,20 @@ if _FASTAPI_AVAILABLE:
 
     # ── Health ────────────────────────────────────────────────
 
-    @app.get("/health", response_model=HealthResponse)
-    def health_check():
-        return {"status": "healthy", "service": "proctorai-backend", "version": "1.0.0"}
+    from infrastructure.api.routers.system import create_system_router
+    from services.system_status_service import SystemStatusService
 
-    @app.get("/ops/status")
-    def ops_status(user: dict = Depends(_require_roles("instructor", "admin"))):
-        db = _get_db()
-        model_path = Path(__import__("config.settings", fromlist=["PHONE_MODEL_PATH"]).PHONE_MODEL_PATH)
-        return {
-            "status": "ok",
-            "environment": APP_ENV,
-            "version": "1.0.0",
-            "uptime_seconds": int(time.time() - _app_started_at),
-            "python": sys.version.split()[0],
-            "database": {
-                "connected": bool(db and db.is_active),
-                "name": __import__("config.settings", fromlist=["DB_NAME"]).DB_NAME,
-                "driver": __import__("config.settings", fromlist=["DB_DRIVER"]).DB_DRIVER,
-            },
-            "storage": {
-                "logs_dir": LOGS_DIR,
-                "reports_dir": __import__("config.settings", fromlist=["REPORTS_DIR"]).REPORTS_DIR,
-                "screenshots_dir": __import__("config.settings", fromlist=["SCREENSHOTS_DIR"]).SCREENSHOTS_DIR,
-            },
-            "proctoring": {
-                "phone_model_available": model_path.exists(),
-                "browser_guard_active": (time.time() - _guard_last_seen) < 15,
-            },
-            "auth": {
-                "role": user.get("role"),
-                "tenant_id": _tenant_id(user),
-            },
-        }
-
-    @app.get("/ops/metrics")
-    def ops_metrics(user: dict = Depends(_require_roles("admin"))):
-        metrics = _repo().dashboard_metrics(_tenant_id(user))
-        metrics.update(
-            {
-                "uptime_seconds": int(time.time() - _app_started_at),
-                "in_memory_events": len(_events),
-                "in_memory_browser_events": len(_browser_events),
-                "active_session_id": _active_session_id(),
-            }
-        )
-        return metrics
+    _system_status_service = SystemStatusService(
+        get_database=_get_db,
+        get_dashboard_metrics=lambda tenant_id: _repo().dashboard_metrics(tenant_id),
+        get_active_session_id=lambda: _active_session_id(),
+        get_tenant_id=_tenant_id,
+        get_guard_last_seen=lambda: _guard_last_seen,
+        get_event_count=lambda: len(_events),
+        get_browser_event_count=lambda: len(_browser_events),
+        started_at=_app_started_at,
+    )
+    app.include_router(create_system_router(_system_status_service, _require_roles))
 
     @app.post("/auth/register", response_model=AuthResponse)
     def register(req: RegisterRequest, request: Request):

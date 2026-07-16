@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-os.environ.setdefault("AUTH_SECRET", "test-auth-secret-that-is-at-least-thirty-two-characters")
+os.environ["AUTH_SECRET"] = os.environ.get("AUTH_SECRET") or "test-auth-secret-that-is-at-least-thirty-two-characters"
 
 from config.settings import PROCTOR_DEVICE_SECRET
 from core.security import (

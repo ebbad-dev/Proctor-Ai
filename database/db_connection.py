@@ -50,6 +50,23 @@ class DatabaseConnection:
         return False
 
     def initialize_schema(self) -> None:
+        from database.schema_migrations import apply_migrations
+
+        apply_migrations(self, self.registered_migrations())
+
+    def registered_migrations(self):
+        from database.schema_migrations import Migration
+
+        return (
+            Migration(
+                migration_id="20260716_0001_phase1_baseline",
+                description="Phase 1 SQL Server baseline with durable monitoring and lifecycle integrity",
+                revision="phase1-baseline-v1",
+                apply=self._initialize_schema_baseline,
+            ),
+        )
+
+    def _initialize_schema_baseline(self) -> None:
         self.execute(
             """
             IF OBJECT_ID('Tenants', 'U') IS NULL

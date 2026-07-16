@@ -40,6 +40,12 @@ batch.
 
 ## Batch 4: integration and maintainability
 
-- Expand SQL-backed API integration tests for tenant and role boundaries.
-- Split the monolithic FastAPI module into routers and application services.
-- Add migration/version tracking and release-readiness checks.
+- Exercise authenticated API tenant isolation, student ownership, role boundaries, and
+  operations access against controlled live SQL rows with `npm run sql:api-integration`.
+- Begin splitting the monolithic FastAPI module by moving health/operations routes into
+  a router and their logic into an independently tested application service.
+- Track applied SQL migrations with immutable checksums and surface their state through
+  the instructor operations endpoint.
+- Centralize the application version used by OpenAPI, health, and operations responses.
+- Run static release-structure checks in local quality and CI, and provide production
+  configuration/database readiness checks through `npm run release:check`.

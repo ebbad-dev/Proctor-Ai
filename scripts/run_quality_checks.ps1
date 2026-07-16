@@ -68,6 +68,10 @@ Invoke-NativeStep "Security regression tests" {
     Invoke-Python -Arguments @("-m", "unittest", "discover", "-s", "tests", "-v")
 }
 
+Invoke-NativeStep "Release structure" {
+    Invoke-Python -Arguments @("scripts/release_readiness.py")
+}
+
 Push-Location frontend
 try {
     Invoke-NativeStep "Frontend typecheck" {

@@ -27,6 +27,7 @@ jobs:
         run: |
           python -m compileall -q infrastructure input monitoring reporting ui utils static config core database run_proctor_engine.py run_fastapi_backend.py scripts
           python -m unittest discover -s tests -v
+          python scripts/release_readiness.py
       - name: Frontend typecheck
         run: npm.cmd --prefix frontend run typecheck -- --pretty false
       - name: Frontend build
