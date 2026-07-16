@@ -1,5 +1,5 @@
 # ============================================================
-# ProctorAI — infrastructure/api/fastapi_app.py
+# ProctorAI â€” infrastructure/api/fastapi_app.py
 #
 # Phase 12: FastAPI backend foundation.
 # Runs alongside Streamlit as a separate process on port 5051.
@@ -14,20 +14,18 @@ import hashlib
 import hmac
 import os
 import json
-import secrets
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
-from urllib.parse import quote, urlencode
-from urllib import request as urlrequest
+from urllib.parse import quote
 from pathlib import Path
 
 _FASTAPI_IMPORT_ERROR = None
 
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException, Request
-    from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+    from fastapi.responses import FileResponse, JSONResponse
     from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel
     _FASTAPI_AVAILABLE = True
@@ -110,9 +108,9 @@ if _FASTAPI_AVAILABLE:
             content={"error": "http_error", "message": str(exc.detail)},
         )
 
-    # ── Mount static files for evidence screenshots ───────────
+    # â”€â”€ Mount static files for evidence screenshots â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    # ── In-memory event store ─────────────────────────────────
+    # â”€â”€ In-memory event store â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     _events:       list[dict] = []
     _browser_events: list[dict] = []
     _guard_last_seen = 0.0
@@ -120,7 +118,7 @@ if _FASTAPI_AVAILABLE:
     _session_store: dict[str, dict] = {}
     _session_reviews: dict[str, dict] = {}
 
-    # ── Models ────────────────────────────────────────────────
+    # â”€â”€ Models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     class BrowserGuardEvent(BaseModel):
         type:     str
@@ -257,38 +255,6 @@ if _FASTAPI_AVAILABLE:
         status: str
         session_id: Optional[str] = None
         idempotent_replay: bool = False
-
-    class UserPublic(BaseModel):
-        user_id: str
-        email: str
-        full_name: str
-        role: str
-        tenant_id: str = "tenant_default"
-        tenant_name: str = "Default Institution"
-        is_active: bool = True
-        created_at: Optional[Any] = None
-        updated_at: Optional[Any] = None
-
-    class AuthResponse(BaseModel):
-        access_token: str
-        token_type: str = "bearer"
-        user: UserPublic
-
-    class RegisterRequest(BaseModel):
-        email: str
-        full_name: str
-        password: str
-
-    class LoginRequest(BaseModel):
-        email: str
-        password: str
-
-    class ForgotPasswordRequest(BaseModel):
-        email: str
-
-    class ResetPasswordRequest(BaseModel):
-        token: str
-        password: str
 
     class ExamRequest(BaseModel):
         exam_code: str = ""
@@ -508,19 +474,6 @@ if _FASTAPI_AVAILABLE:
             return {"kind": "user", "user": _current_user(authorization)}
         _api_error(401, "not_authenticated", "Browser signals require a signed-in student or trusted device.")
 
-    def _public_user(user: dict) -> dict:
-        return {
-            "user_id": str(user.get("user_id", "")),
-            "email": str(user.get("email", "")),
-            "full_name": str(user.get("full_name", "")),
-            "role": str(user.get("role", "")),
-            "tenant_id": str(user.get("tenant_id") or "tenant_default"),
-            "tenant_name": str(user.get("tenant_name") or "Default Institution"),
-            "is_active": bool(user.get("is_active", True)),
-            "created_at": user.get("created_at"),
-            "updated_at": user.get("updated_at"),
-        }
-
     def _tenant_id(user: dict | None = None) -> str:
         return str((user or {}).get("tenant_id") or "tenant_default")
 
@@ -560,44 +513,6 @@ if _FASTAPI_AVAILABLE:
         if isinstance(value, datetime):
             return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-
-    def _b64url(data: bytes) -> str:
-        return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-    def _unb64url(data: str) -> bytes:
-        return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
-
-    def _oauth_state() -> str:
-        from core.security import require_auth_secret
-        payload = {
-            "nonce": secrets.token_urlsafe(18),
-            "exp": int(time.time()) + 600,
-            "provider": "google",
-        }
-        body = _b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-        sig = _b64url(hmac.new(require_auth_secret().encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest())
-        return f"{body}.{sig}"
-
-    def _verify_oauth_state(state: str) -> bool:
-        try:
-            from core.security import require_auth_secret
-            body, sig = state.split(".", 1)
-            expected = _b64url(hmac.new(require_auth_secret().encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest())
-            if not hmac.compare_digest(sig, expected):
-                return False
-            payload = json.loads(_unb64url(body).decode("utf-8"))
-            return payload.get("provider") == "google" and int(payload.get("exp", 0)) >= int(time.time())
-        except Exception:
-            return False
-
-    def _frontend_oauth_error(code: str, message: str) -> RedirectResponse:
-        from config.settings import FRONTEND_URL
-        return RedirectResponse(f"{FRONTEND_URL}/login?oauth_error={quote(message)}&oauth_code={quote(code)}", status_code=302)
-
-    def _frontend_oauth_success(session: dict) -> RedirectResponse:
-        from config.settings import FRONTEND_URL
-        payload = _b64url(json.dumps(session, default=str, separators=(",", ":")).encode("utf-8"))
-        return RedirectResponse(f"{FRONTEND_URL}/oauth-callback#session={payload}", status_code=302)
 
     def _require_session_access(session_id: str, user: dict) -> None:
         db = _get_db()
@@ -648,7 +563,7 @@ if _FASTAPI_AVAILABLE:
             _api_error(409, "session_not_active", "Browser signals are accepted only for the active session.")
         return session_id
 
-    # ── Health ────────────────────────────────────────────────
+    # â”€â”€ Health â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     from infrastructure.api.routers.system import create_system_router
     from services.system_status_service import SystemStatusService
@@ -665,177 +580,33 @@ if _FASTAPI_AVAILABLE:
     )
     app.include_router(create_system_router(_system_status_service, _require_roles))
 
-    @app.post("/auth/register", response_model=AuthResponse)
-    def register(req: RegisterRequest, request: Request):
-        email = (req.email or "").strip().lower()
-        full_name = (req.full_name or "").strip()
-        if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
-            _api_error(422, "validation_error", "Enter a valid email address.")
-        if len(full_name) < 2:
-            _api_error(422, "validation_error", "Enter your full name.")
-        from core.security import create_access_token, hash_password, validate_password
-        errors = validate_password(req.password)
-        if errors:
-            _api_error(422, "validation_error", "Password does not meet requirements.", errors)
-        repo = _repo()
-        if repo.get_user_by_email(email):
-            _api_error(409, "email_exists", "An account with this email already exists.")
-        user = repo.create_user(email, full_name, "student", hash_password(req.password))
-        _audit("auth.register", actor=user, resource_type="user", resource_id=user["user_id"], request=request)
-        return {"access_token": create_access_token(user), "token_type": "bearer", "user": _public_user(user)}
+    from config.settings import (
+        FRONTEND_URL,
+        GOOGLE_CLIENT_ID,
+        GOOGLE_CLIENT_SECRET,
+        GOOGLE_REDIRECT_URI,
+    )
+    from infrastructure.api.routers.identity import UserPublic, create_identity_router
+    from services.identity_service import IdentityService, IdentitySettings, public_user
 
-    @app.post("/auth/login", response_model=AuthResponse)
-    def login(req: LoginRequest, request: Request):
-        repo = _repo()
-        user = repo.get_user_by_email((req.email or "").strip().lower())
-        from core.security import create_access_token, verify_password
-        if not user or not verify_password(req.password, user.get("password_hash", "")):
-            _api_error(401, "invalid_credentials", "Email or password is incorrect.")
-        if not bool(user.get("is_active", True)):
-            _api_error(403, "account_disabled", "This account is disabled.")
-        _audit("auth.login", actor=user, resource_type="user", resource_id=user["user_id"], request=request)
-        return {"access_token": create_access_token(user), "token_type": "bearer", "user": _public_user(user)}
-
-    @app.get("/auth/me", response_model=UserPublic)
-    def auth_me(user: dict = Depends(_current_user)):
-        return _public_user(user)
-
-    @app.post("/auth/logout")
-    def auth_logout(request: Request, user: dict = Depends(_current_user)):
-        _audit("auth.logout", actor=user, resource_type="user", resource_id=user["user_id"], request=request)
-        return {"status": "ok"}
-
-    @app.post("/auth/forgot-password")
-    def forgot_password(req: ForgotPasswordRequest, request: Request):
-        from config.settings import FRONTEND_URL
-        from core.email_service import EmailConfigurationError, send_password_reset_email, smtp_configured
-        if not smtp_configured():
-            _api_error(503, "email_not_configured", "Password reset email is not configured.")
-        repo = _repo()
-        user = repo.get_user_by_email((req.email or "").strip().lower())
-        if not user:
-            _api_error(404, "email_not_found", "No account exists for that email address.")
-        from core.security import create_reset_token
-        token, token_hash, expires_at = create_reset_token()
-        repo.create_reset_token(user["user_id"], token_hash, expires_at)
-        reset_url = f"{FRONTEND_URL}/reset-password?token={token}"
-        try:
-            send_password_reset_email(user["email"], reset_url)
-        except EmailConfigurationError as exc:
-            _api_error(503, "email_not_configured", str(exc) or "Password reset email is not configured.")
-        except Exception:
-            _api_error(502, "email_delivery_failed", "Could not send the reset email.")
-        _audit("auth.password_reset_requested", actor=user, resource_type="user", resource_id=user["user_id"], request=request)
-        return {"status": "ok"}
-
-    @app.post("/auth/reset-password")
-    def reset_password(req: ResetPasswordRequest, request: Request):
-        from core.security import hash_password, hash_reset_token, validate_password
-        errors = validate_password(req.password)
-        if errors:
-            _api_error(422, "validation_error", "Password does not meet requirements.", errors)
-        repo = _repo()
-        row = repo.get_reset_token(hash_reset_token(req.token))
-        if not row:
-            _api_error(400, "invalid_reset_token", "The reset link is invalid.")
-        if row.get("used_at"):
-            _api_error(400, "reset_token_used", "The reset link has already been used.")
-        try:
-            expires_at = _parse_dt(row.get("expires_at"))
-        except Exception:
-            _api_error(400, "invalid_reset_token", "The reset link is invalid.")
-        if expires_at < datetime.now(expires_at.tzinfo or timezone.utc):
-            _api_error(400, "reset_token_expired", "The reset link has expired.")
-        repo.update_password(row["user_id"], hash_password(req.password))
-        repo.mark_reset_token_used(row["token_id"])
-        user = repo.get_user(row["user_id"])
-        _audit("auth.password_reset_completed", actor=user, resource_type="user", resource_id=row["user_id"], request=request)
-        return {"status": "ok"}
-
-    @app.get("/auth/google/start")
-    def google_auth_start():
-        from config.settings import GOOGLE_CLIENT_ID, GOOGLE_REDIRECT_URI
-        if not GOOGLE_CLIENT_ID:
-            return _frontend_oauth_error("google_not_configured", "Google sign-in is not configured.")
-        params = urlencode(
-            {
-                "client_id": GOOGLE_CLIENT_ID,
-                "redirect_uri": GOOGLE_REDIRECT_URI,
-                "response_type": "code",
-                "scope": "openid email profile",
-                "state": _oauth_state(),
-                "access_type": "online",
-                "prompt": "select_account",
-            }
+    _identity_service = IdentityService(
+        repository_provider=_repo,
+        settings=IdentitySettings(
+            frontend_url=FRONTEND_URL,
+            google_client_id=GOOGLE_CLIENT_ID,
+            google_client_secret=GOOGLE_CLIENT_SECRET,
+            google_redirect_uri=GOOGLE_REDIRECT_URI,
+        ),
+    )
+    _public_user = public_user
+    app.include_router(
+        create_identity_router(
+            _identity_service,
+            current_user=_current_user,
+            audit=_audit,
+            api_error=_api_error,
         )
-        return RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{params}", status_code=302)
-
-    @app.get("/auth/google/callback")
-    def google_auth_callback(code: str = "", state: str = "", error: str = ""):
-        from config.settings import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI
-        if error:
-            return _frontend_oauth_error("google_denied", "Google sign-in was cancelled.")
-        if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-            return _frontend_oauth_error("google_not_configured", "Google sign-in is not configured.")
-        if not code or not state or not _verify_oauth_state(state):
-            return _frontend_oauth_error("invalid_oauth_state", "Google sign-in session expired. Try again.")
-
-        try:
-            token_body = urlencode(
-                {
-                    "code": code,
-                    "client_id": GOOGLE_CLIENT_ID,
-                    "client_secret": GOOGLE_CLIENT_SECRET,
-                    "redirect_uri": GOOGLE_REDIRECT_URI,
-                    "grant_type": "authorization_code",
-                }
-            ).encode("utf-8")
-            token_req = urlrequest.Request(
-                "https://oauth2.googleapis.com/token",
-                data=token_body,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                method="POST",
-            )
-            with urlrequest.urlopen(token_req, timeout=12) as resp:
-                token_payload = json.loads(resp.read().decode("utf-8"))
-            id_token = token_payload.get("id_token")
-            if not id_token:
-                return _frontend_oauth_error("google_token_missing", "Google did not return an identity token.")
-
-            with urlrequest.urlopen(
-                f"https://oauth2.googleapis.com/tokeninfo?id_token={quote(id_token)}",
-                timeout=12,
-            ) as resp:
-                claims = json.loads(resp.read().decode("utf-8"))
-        except Exception:
-            return _frontend_oauth_error("google_exchange_failed", "Could not verify your Google account.")
-
-        if claims.get("aud") != GOOGLE_CLIENT_ID or claims.get("email_verified") not in {True, "true", "True", "1"}:
-            return _frontend_oauth_error("google_identity_invalid", "Google account verification failed.")
-
-        email = str(claims.get("email") or "").strip().lower()
-        full_name = str(claims.get("name") or email.split("@", 1)[0] or "Google User").strip()
-        if not email:
-            return _frontend_oauth_error("google_email_missing", "Google did not provide an email address.")
-
-        from core.security import create_access_token, hash_password
-        repo = _repo()
-        user = repo.get_user_by_email(email)
-        if user and not bool(user.get("is_active", True)):
-            return _frontend_oauth_error("account_disabled", "This account is disabled.")
-        if user:
-            action = "auth.google_login"
-        else:
-            user = repo.create_user(email, full_name, "student", hash_password(secrets.token_urlsafe(32)))
-            action = "auth.google_register"
-        _audit(action, actor=user, resource_type="user", resource_id=user["user_id"])
-        return _frontend_oauth_success(
-            {
-                "access_token": create_access_token(user),
-                "token_type": "bearer",
-                "user": _public_user(user),
-            }
-        )
+    )
 
     def _format_exam(row: dict) -> dict:
         rules = row.get("rules_json") or row.get("rules") or {}
@@ -1773,7 +1544,7 @@ if _FASTAPI_AVAILABLE:
         )
         return {"status": "ok", "user_id": target_user_id}
 
-    # ── Bridge helper ──────────────────────────────────────────
+    # â”€â”€ Bridge helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def _get_detector():
         """Lazily import the TabSwitchDetector singleton for bridging."""
         try:
@@ -2323,7 +2094,7 @@ if _FASTAPI_AVAILABLE:
         except Exception as exc:
             return {"engine_running": False, "ready": False, "status": "stopped", "last_error": str(exc)}
 
-    # ── Browser Guard (extension → FastAPI → bridge) ─────────
+    # â”€â”€ Browser Guard (extension â†’ FastAPI â†’ bridge) â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _browser_event_should_score(event_type: str) -> bool:
         return (event_type or "").strip().lower() not in {"heartbeat", "ping", "window_focus"}
@@ -2414,7 +2185,7 @@ if _FASTAPI_AVAILABLE:
             "last_seen_seconds_ago": round(time.monotonic() - _guard_last_seen, 1) if _guard_last_seen else None,
         }
 
-    # ── Extension content.js events (keyboard / clipboard) ───
+    # â”€â”€ Extension content.js events (keyboard / clipboard) â”€â”€â”€
 
     class KeyEvent(BaseModel):
         combo: str = "unknown"
@@ -2596,7 +2367,7 @@ if _FASTAPI_AVAILABLE:
             "duplicate": bool(record and record.get("duplicate") and (risk_record or {}).get("duplicate")),
         }
 
-    # ── Proctor Events ────────────────────────────────────────
+    # â”€â”€ Proctor Events â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @app.post("/events")
     def post_event(ev: ProctorEvent, _device: dict = Depends(_require_proctor_device)):
@@ -2625,7 +2396,7 @@ if _FASTAPI_AVAILABLE:
             "duplicate": bool(record.get("duplicate")),
         }
 
-    # ── Session ───────────────────────────────────────────────
+    # â”€â”€ Session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @app.post("/sessions/start")
     def start_session(meta: SessionMeta, request: Request, user: dict = Depends(_current_user)):
@@ -3164,7 +2935,7 @@ if _FASTAPI_AVAILABLE:
             "idempotent_replay": idempotent_replay,
         }
 
-    # ── Assistant ─────────────────────────────────────────────
+    # â”€â”€ Assistant â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     class AssistantQuery(BaseModel):
         query: str
