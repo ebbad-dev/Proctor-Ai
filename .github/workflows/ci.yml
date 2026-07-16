@@ -7,13 +7,18 @@ on:
 jobs:
   verify:
     runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
-          python-version: '3.12.13'
+          # Resolve the newest available 3.12 patch for the active runner image.
+          python-version: '3.12'
           cache: pip
-      - uses: actions/setup-node@v4
+          cache-dependency-path: requirements.lock.txt
+      - uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: npm
