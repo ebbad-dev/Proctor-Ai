@@ -20,10 +20,19 @@ logger = get_logger("ReportGenerator")
 
 
 def _display_time(value) -> str:
-    text = str(value or "")
-    if len(text) >= 19 and "T" in text:
-        return text[11:19]
-    return text
+    # Timeline cells show local wall-clock time (HH:MM:SS), matching the evidence gallery.
+    # Database values arrive as UTC datetimes; naive values are already local.
+    if isinstance(value, datetime):
+        moment = value
+    else:
+        text = str(value or "")
+        try:
+            moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return text[11:19] if len(text) >= 19 and "T" in text else text
+    if moment.tzinfo is not None:
+        moment = moment.astimezone()
+    return moment.strftime("%H:%M:%S")
 
 
 class ReportGenerator:
@@ -378,7 +387,7 @@ class ReportGenerator:
             bl_data = [["Time", "Event", "Description"]]
             for e in browser_log[:20]:
                 bl_data.append([
-                    e.get("time", ""),
+                    _display_time(e.get("time") or e.get("timestamp")),
                     e.get("event_type", "")[:25],
                     e.get("description", "")[:55],
                 ])

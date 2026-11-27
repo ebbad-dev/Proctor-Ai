@@ -40,7 +40,7 @@ export function RiskStoryCard({ risk, session, compact, className }: Props) {
 
   const safeguards: string[] = [];
   if (session?.browser_guard_active) safeguards.push("Browser Guard active");
-  if (session?.id_verification?.verified) safeguards.push("ID verified");
+  if (session?.id_verification?.verified) safeguards.push("Face and ID captured");
   if (session?.room_scan?.completed) safeguards.push("Room scan completed");
 
   const tone =

@@ -350,7 +350,26 @@ class SessionLifecycleRepositoryTests(unittest.TestCase):
 
         self.assertTrue(result["idempotent_replay"])
         self.assertEqual(result["score"], 7)
-        self.assertIn("COALESCE(final_score", db.executed[0][0])
+        # The exam mark must never overwrite the session's risk score.
+        self.assertNotIn("final_score", db.executed[0][0])
+
+    def test_first_submit_keeps_the_session_risk_score(self) -> None:
+        db = self.CaptureDatabase()
+        repo = PlatformRepository(db)
+        in_progress = {"attempt_id": "attempt_1", "exam_id": "exam_1", "session_id": "session_1", "status": "in_progress"}
+        submitted = {**in_progress, "status": "submitted", "score": 2}
+
+        with (
+            patch.object(repo, "get_attempt", side_effect=[in_progress, submitted]),
+            patch.object(repo, "get_attempt_responses", return_value=[{"awarded_marks": 1}, {"awarded_marks": 1}]),
+            patch.object(repo, "exam_max_score", return_value=2),
+        ):
+            result = repo.submit_attempt("attempt_1")
+
+        self.assertEqual(result["score"], 2)
+        session_updates = [sql for sql, _ in db.executed if "UPDATE Sessions" in sql]
+        self.assertEqual(len(session_updates), 1)
+        self.assertNotIn("final_score", session_updates[0])
 
     def test_concurrent_submit_loser_is_reported_as_a_replay(self) -> None:
         class LostRaceDatabase(self.CaptureDatabase):

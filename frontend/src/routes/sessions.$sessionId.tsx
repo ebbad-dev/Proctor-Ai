@@ -14,6 +14,7 @@ import { LoadingSkeleton, NoBrowserActivity, NoAudioEvents } from "@/components/
 import { RiskStoryCard } from "@/components/common/RiskStoryCard";
 import { StickyReviewBar } from "@/components/common/StickyReviewBar";
 import { useExamAttempts, useSession, useSubmitReview } from "@/lib/queries";
+import { getAuthSession } from "@/lib/auth";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FileText, ScanFace, DoorOpen, Check, XCircle, AlertTriangle, Trash2 } from "lucide-react";
 
@@ -36,6 +37,8 @@ function SessionReviewPage() {
   const attempts = useExamAttempts(data?.exam.id ?? "");
   const review = useSubmitReview(sessionId);
   const [notes, setNotes] = useState("");
+  // Students land here after submitting; review decisions are instructor/admin only (the API returns 403).
+  const canReview = getAuthSession()?.user.role !== "student";
 
   if (isLoading || !data) {
     return (
@@ -187,7 +190,7 @@ function SessionReviewPage() {
                   <ScanFace className="h-4 w-4 text-primary" /> ID verification
                 </div>
                 <div className="mt-2 text-xs text-muted-foreground">
-                  {data.id_verification?.verified ? "Verified" : "Not verified"}
+                  {data.id_verification?.verified ? "Face and ID captured" : "Not captured"}
                 </div>
               </GlassCard>
               <GlassCard className="p-4">
@@ -195,13 +198,14 @@ function SessionReviewPage() {
                   <DoorOpen className="h-4 w-4 text-primary" /> Room scan
                 </div>
                 <div className="mt-2 text-xs text-muted-foreground">
-                  {data.room_scan?.completed ? "Completed" : "Skipped"}
+                  {data.room_scan?.completed ? "Completed" : "Not completed"}
                 </div>
               </GlassCard>
             </TabsContent>
           </Tabs>
         </GlassCard>
 
+        {canReview && (
         <GlassCard className="p-4">
           <h3 className="text-sm font-semibold">Instructor notes</h3>
           <label className="sr-only" htmlFor="instructor-notes">
@@ -263,8 +267,9 @@ function SessionReviewPage() {
             academic outcome.
           </p>
         </GlassCard>
+        )}
 
-        <StickyReviewBar session={data} />
+        {canReview && <StickyReviewBar session={data} />}
       </div>
     </AppShell>
   );

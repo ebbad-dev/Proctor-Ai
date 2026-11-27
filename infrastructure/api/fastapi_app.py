@@ -189,6 +189,9 @@ if _FASTAPI_AVAILABLE:
         filepath: str
         risk_points: Optional[int] = None
         camera: Optional[str] = None
+        evidence_id: Optional[str] = None
+        evidence_type: Optional[str] = None
+        label: Optional[str] = None
 
     class BrowserActivityItem(BaseModel):
         session_id: Optional[str] = None
@@ -209,6 +212,8 @@ if _FASTAPI_AVAILABLE:
         user_id: Optional[str] = None
         exam_id: Optional[str] = None
         student_id: str
+        student_name: Optional[str] = None
+        roll_number: Optional[str] = None
         exam_code: str
         start_time: Optional[str]
         end_time: Optional[str]
@@ -1342,7 +1347,7 @@ if _FASTAPI_AVAILABLE:
                     "status": "stopped",
                     "last_error": "Proctor engine status heartbeat is stale.",
                 })
-                status["primary_camera"] = {**(status.get("primary_camera") or {}), "active": False}
+                status["primary_camera"] = {**(status.get("primary_camera") or {}), "active": False, "standby": False}
                 status["secondary_camera"] = {**(status.get("secondary_camera") or {}), "active": False}
                 status["microphone"] = {**(status.get("microphone") or {}), "active": False, "level": 0.0}
                 status["video_stream"] = {**(status.get("video_stream") or {}), "active": False}
@@ -1967,6 +1972,7 @@ if _FASTAPI_AVAILABLE:
             return f"/captures/{quote(rel, safe='/')}?session_id={quote(session_id, safe='')}"
 
         evidence = []
+        indexed = False
         session_dir = os.path.join(SCREENSHOTS_DIR, session_id)
         index_path = os.path.join(session_dir, "evidence_index.json")
 
@@ -1987,11 +1993,11 @@ if _FASTAPI_AVAILABLE:
                         "risk_points": item.get("risk_score"),
                         "camera": item.get("camera"),
                     })
-                return evidence
+                indexed = True
             except Exception:
                 evidence = []
 
-        if os.path.exists(SCREENSHOTS_DIR):
+        if not indexed and os.path.exists(SCREENSHOTS_DIR):
             for root, _, files in os.walk(SCREENSHOTS_DIR):
                 parent = os.path.basename(root)
                 for file in files:
@@ -2011,6 +2017,37 @@ if _FASTAPI_AVAILABLE:
                         "timestamp": datetime.fromtimestamp(os.path.getmtime(path)).isoformat(),
                         "filepath": capture_url(path),
                     })
+
+        # Uploaded evidence (pre-exam face, ID card and room scan) is recorded in SQL but never
+        # added to the engine's evidence_index.json, so merge it in or reviewers never see it.
+        db = _get_db()
+        if db and db.is_active:
+            try:
+                recorded = _repo().list_session_evidence(session_id)
+            except Exception:
+                recorded = []
+            seen = {item["filename"] for item in evidence}
+            base = os.path.realpath(SCREENSHOTS_DIR)
+            uploads = []
+            for row in recorded:
+                path = os.path.realpath(row.get("filepath") or "")
+                name = os.path.basename(path)
+                if not name or name in seen or not os.path.isfile(path):
+                    continue
+                if os.path.commonpath([base, path]) != base:
+                    continue
+                seen.add(name)
+                uploads.append({
+                    "session_id": session_id,
+                    "filename": name,
+                    "event_type": row.get("label") or row.get("evidence_type") or "evidence",
+                    "timestamp": _iso(row.get("created_at")),
+                    "filepath": capture_url(path),
+                    "evidence_id": row.get("evidence_id"),
+                    "evidence_type": row.get("evidence_type"),
+                    "label": row.get("label"),
+                })
+            evidence = uploads + evidence
         return evidence
 
     def _resolve_session_capture(capture_path: str, session_id: str) -> Path:

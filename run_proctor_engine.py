@@ -146,14 +146,17 @@ class ProctorEngine:
         self.last_detection_at = ""
         self.last_error = ""
         self.startup_errors: list[str] = []
+        self.camera_available = False
+        self._next_camera_attempt = 0.0
 
     def start(self) -> None:
-        self._start_camera()
+        self._init_cameras()
         self._start_microphone()
         self._start_video_sidecar()
         while True:
             try:
                 self._sync_session()
+                self._ensure_session_cameras()
                 self._detect_once()
                 self._write_status()
             except Exception as exc:
@@ -162,19 +165,47 @@ class ProctorEngine:
                 self._write_status()
             time.sleep(PROCTOR_POLL_SEC)
 
-    def _start_camera(self) -> None:
+    def _init_cameras(self) -> None:
+        # Cameras are held only while an exam session is active. Webcams are exclusive on
+        # Windows, so holding one while idle stops the browser's pre-exam camera test,
+        # ID capture and room scan with "Device in use".
         try:
             from input.webcam_capture import WebcamCapture
 
             self.webcam = WebcamCapture(label="primary")
-            self.webcam.start_camera()
             if WEBCAM_INDEX_SECONDARY >= 0:
                 self.webcam2 = WebcamCapture(camera_index=WEBCAM_INDEX_SECONDARY, label="secondary")
-                self.webcam2.start_camera()
+            self.camera_available = self.webcam.start_camera()
+            self.webcam.stop_camera()
+            if not self.camera_available:
+                self.last_error = "camera startup probe failed: primary camera unavailable"
+                self.startup_errors.append(self.last_error)
+                logger.warning(self.last_error)
         except Exception as exc:
             self.last_error = f"camera startup failed: {exc}"
             self.startup_errors.append(self.last_error)
             logger.warning(self.last_error)
+
+    def _ensure_session_cameras(self) -> None:
+        if not self.session or not self.webcam or self.webcam.is_running:
+            return
+        now = time.monotonic()
+        if now < self._next_camera_attempt:
+            return
+        # The browser releases the camera when the exam starts; retry until the device is free.
+        if self.webcam.start_camera():
+            self.camera_available = True
+            if self.webcam2:
+                self.webcam2.start_camera()
+        else:
+            self.last_error = "primary camera busy or unavailable; retrying"
+            self._next_camera_attempt = now + 2.0
+
+    def _release_cameras(self) -> None:
+        for camera in (self.webcam, self.webcam2):
+            if camera and camera.is_running:
+                camera.stop_camera()
+        self._next_camera_attempt = 0.0
 
     def _start_microphone(self) -> None:
         try:
@@ -226,6 +257,7 @@ class ProctorEngine:
                 logger.info("Active proctor session: %s", self.session["session_id"])
             else:
                 self.screenshots = None
+                self._release_cameras()
 
     def _detect_once(self) -> None:
         if not self.session:
@@ -342,7 +374,9 @@ class ProctorEngine:
         primary_active = bool(self.webcam and self.webcam.is_running)
         secondary_active = bool(self.webcam2 and self.webcam2.is_running)
         microphone_active = bool(self.mic and getattr(self.mic, "is_available", False))
-        engine_ready = primary_active and microphone_active
+        # Between sessions the camera is released on purpose; it is ready if the startup probe opened it.
+        primary_standby = not self.session and not primary_active and self.camera_available
+        engine_ready = (primary_active or primary_standby) and microphone_active
         width, height = self.webcam.resolution if primary_active else (0, 0)
         width2, height2 = self.webcam2.resolution if secondary_active else (0, 0)
         return {
@@ -357,6 +391,7 @@ class ProctorEngine:
             "startup_errors": self.startup_errors,
             "primary_camera": {
                 "active": primary_active,
+                "standby": primary_standby,
                 "resolution": f"{width}x{height}" if primary_active else "",
                 "fps": self.webcam.fps if primary_active else 0,
                 "frozen": bool(self.webcam and self.webcam.is_frozen),

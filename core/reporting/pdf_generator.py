@@ -59,11 +59,14 @@ class PDFReportGenerator:
             for event_type, count in event_counts.items()
         ]
         start = session.get("start_time") or session.get("started_at")
+        end = session.get("end_time") or session.get("ended_at")
         duration_sec = 0
         if start:
             try:
                 started = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
-                duration_sec = max(0, int((datetime.now(started.tzinfo) - started).total_seconds()))
+                # A finished session's duration ends at end_time, not when the report is generated.
+                finished = datetime.fromisoformat(str(end).replace("Z", "+00:00")) if end else datetime.now(started.tzinfo)
+                duration_sec = max(0, int((finished - started).total_seconds()))
             except Exception:
                 duration_sec = 0
 

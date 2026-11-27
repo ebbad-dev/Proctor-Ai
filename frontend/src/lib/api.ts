@@ -261,6 +261,7 @@ function mapBackendBrowserActivityToBrowserActivity(raw: any): BrowserActivity {
     page_title: raw.title,
     domain_category: raw.category ? "suspicious" : undefined,
     risk_impact: raw.risk_impact ?? raw.risk_points ?? 0,
+    source: raw.source,
   };
 }
 
@@ -366,12 +367,13 @@ export const api = {
 
   async checkCameraStream(source: "primary" | "secondary" = "primary"): Promise<boolean> {
     // The MJPEG feed needs a session-bound media token, so an anonymous request to it always
-    // fails before an exam starts. The proctor engine reports live camera state instead.
+    // fails before an exam starts. The proctor engine reports live camera state instead; between
+    // sessions it releases the webcam for the browser and reports a verified standby state.
     if (typeof window === "undefined") return false;
     try {
       const status = await http<ProctorStatus>(endpoints.proctorStatus);
       const camera = source === "primary" ? status.primary_camera : status.secondary_camera;
-      return Boolean(camera?.active);
+      return Boolean(camera?.active || camera?.standby);
     } catch {
       return false;
     }
@@ -609,14 +611,21 @@ export const api = {
         updated_at: new Date().toISOString(),
       })),
     ]);
+    // Derived from the pre-exam captures that were actually stored for this session.
+    const faceCapture = evidence.find((item) => item.type === "face");
+    const idCapture = evidence.find((item) => item.type === "id_card");
+    const roomCaptures = evidence.filter((item) => item.type === "room_scan");
     return {
       ...base,
+      id_verification: { verified: Boolean(faceCapture && idCapture), evidence_id: idCapture?.id },
+      room_scan: { completed: roomCaptures.length > 0, evidence_ids: roomCaptures.map((item) => item.id) },
       events,
       events_count: raw.event_count ?? events.length,
       evidence,
       evidence_count: evidence.length,
       browser_activity,
-      browser_guard_active: browser_activity.length > 0,
+      // "browser_client" is the exam page's own fallback signal, not the Browser Guard extension.
+      browser_guard_active: browser_activity.some((item) => Boolean(item.source) && item.source !== "browser_client"),
       audio_events,
       risk,
       risk_score: risk.score,

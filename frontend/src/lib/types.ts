@@ -19,8 +19,8 @@ export interface ProctorStatus {
   video_access_token?: string | null;
   last_detection_at?: string;
   last_error?: string;
-  primary_camera?: { active: boolean; resolution?: string; fps?: number; frozen?: boolean };
-  secondary_camera?: { active: boolean; resolution?: string; fps?: number };
+  primary_camera?: { active: boolean; standby?: boolean; resolution?: string; fps?: number; frozen?: boolean };
+  secondary_camera?: { active: boolean; standby?: boolean; resolution?: string; fps?: number };
   microphone?: { active: boolean; level?: number };
   video_stream?: { active: boolean; url?: string };
   phone_detection?: { available: boolean; status: string; reason?: string };
@@ -237,6 +237,7 @@ export interface BrowserActivity {
   domain_category?: "ai_assistant" | "search" | "social" | "education" | "neutral" | "suspicious";
   time_away_ms?: number;
   risk_impact: number;
+  source?: string;
 }
 
 export interface AudioEvent {

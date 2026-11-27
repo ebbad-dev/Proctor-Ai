@@ -72,11 +72,18 @@ export const Route = createFileRoute("/monitor")({
 function MonitorPage() {
   const search = Route.useSearch();
   const sessionsList = useSessions();
+  const proctorStatus = useProctorStatus();
 
-  // Pick the requested session, or the first active one, or fallback to ""
+  // Pick the requested session, else the one the proctor engine is monitoring right now, else a
+  // recently started in-progress session (sessions never ended by a crashed client must not be
+  // shown as live), else the most recent session.
+  const recentCutoff = Date.now() - 24 * 60 * 60 * 1000;
   const derivedSessionId =
     search.session_id ||
-    sessionsList.data?.find((s) => s.status === "in_progress")?.id ||
+    proctorStatus.data?.active_session_id ||
+    sessionsList.data?.find(
+      (s) => s.status === "in_progress" && new Date(s.started_at).getTime() >= recentCutoff,
+    )?.id ||
     sessionsList.data?.[0]?.id ||
     "";
 
@@ -88,7 +95,6 @@ function MonitorPage() {
   const audio = useAudio(derivedSessionId);
   const backendHealth = useHealth();
   const guardHealth = useBrowserGuardActive();
-  const proctorStatus = useProctorStatus();
   const endSession = useEndSession(derivedSessionId);
   const primaryStreamHealth = useCameraStreamHealth("primary");
   const secondaryStreamHealth = useCameraStreamHealth("secondary");
@@ -176,11 +182,15 @@ function MonitorPage() {
           <div className="ml-auto flex items-center gap-2">
             <StatusBadge label={`${session.data?.strictness ?? "—"} strictness`} status="info" />
             <StatusBadge label="Backend connected" status="ok" />
-            <Timer startISO={session.data?.started_at} onTick={() => setTick((t) => t + 1)} />
+            <Timer
+              startISO={session.data?.started_at}
+              endISO={session.data?.status === "in_progress" ? undefined : session.data?.ended_at}
+              onTick={() => setTick((t) => t + 1)}
+            />
             <GlowButton
               variant="outline"
               size="sm"
-              disabled={!derivedSessionId || endSession.isPending}
+              disabled={!derivedSessionId || endSession.isPending || session.data?.status !== "in_progress"}
               onClick={() => endSession.mutate()}
             >
               <PowerOff className="h-4 w-4" /> End exam
@@ -361,16 +371,21 @@ function MonitorPage() {
   );
 }
 
-function Timer({ startISO, onTick }: { startISO?: string; onTick: () => void }) {
+function Timer({ startISO, endISO, onTick }: { startISO?: string; endISO?: string; onTick: () => void }) {
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     if (!startISO) return;
+    // A finished session shows its final duration instead of counting on.
+    if (endISO) {
+      setElapsed(Math.max(0, Math.floor((new Date(endISO).getTime() - new Date(startISO).getTime()) / 1000)));
+      return;
+    }
     const id = setInterval(() => {
       setElapsed(Math.floor((Date.now() - new Date(startISO).getTime()) / 1000));
       onTick();
     }, 1000);
     return () => clearInterval(id);
-  }, [startISO, onTick]);
+  }, [startISO, endISO, onTick]);
   const h = Math.floor(elapsed / 3600);
   const m = Math.floor((elapsed % 3600) / 60);
   const s = elapsed % 60;

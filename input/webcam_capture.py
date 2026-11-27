@@ -58,11 +58,15 @@ class WebcamCapture:
 
     def start_camera(self) -> bool:
         """Open the camera and start the background capture thread."""
+        if self.is_running:
+            return True
         self._cap = cv2.VideoCapture(self._index)
         if not self._cap.isOpened():
             logger.warning(
                 f"[{self._label}] Camera {self._index} unavailable."
             )
+            self._cap.release()
+            self._cap = None
             return False
 
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_WIDTH)
@@ -83,9 +87,20 @@ class WebcamCapture:
 
     def stop_camera(self):
         self._running = False
+        # Let the capture thread finish its current read before the device is released,
+        # so a later start_camera() never runs alongside a stale thread.
+        if self._thread and self._thread.is_alive() and self._thread is not threading.current_thread():
+            self._thread.join(timeout=2.0)
+        self._thread = None
         if self._cap:
             self._cap.release()
             self._cap = None
+        with self._lock:
+            self._frame = None
+        self._fps_times = []
+        self._fps = 0.0
+        self._frozen_since = None
+        self._last_frame_at = None
         logger.info(f"[{self._label}] Camera stopped.")
 
     def get_frame(self):

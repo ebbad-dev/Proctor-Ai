@@ -62,7 +62,7 @@ function SetupPage() {
   const [rollNumber, setRollNumber] = useState("");
   const [startError, setStartError] = useState("");
   const [starting, setStarting] = useState(false);
-  const [cameraPermission, setCameraPermission] = useState<"idle" | "ok" | "error">("idle");
+  const [cameraPermission, setCameraPermission] = useState<"idle" | "ok" | "error" | "busy">("idle");
   const [micPermission, setMicPermission] = useState<"idle" | "ok" | "error">("idle");
   const [cameraStreaming, setCameraStreaming] = useState(false);
   const [faceImage, setFaceImage] = useState("");
@@ -119,9 +119,10 @@ function SetupPage() {
       }
       setCameraStreaming(true);
       setCameraPermission("ok");
-    } catch {
+    } catch (error) {
       setCameraStreaming(false);
-      setCameraPermission("error");
+      // NotReadableError means permission was granted but another app holds the webcam.
+      setCameraPermission(error instanceof DOMException && error.name === "NotReadableError" ? "busy" : "error");
     }
   };
 
@@ -416,9 +417,11 @@ function SetupPage() {
                     <Camera className="h-4 w-4" /> Camera{" "}
                     {cameraPermission === "ok"
                       ? "allowed"
-                      : cameraPermission === "error"
-                        ? "blocked"
-                        : "test"}
+                      : cameraPermission === "busy"
+                        ? "in use by another app"
+                        : cameraPermission === "error"
+                          ? "blocked"
+                          : "test"}
                   </GlowButton>
                   <GlowButton
                     variant="outline"

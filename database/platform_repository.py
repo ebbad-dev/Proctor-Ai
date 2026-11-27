@@ -854,8 +854,7 @@ class PlatformRepository:
                     """
                     UPDATE Sessions
                     SET status = CASE WHEN status = ? THEN status ELSE ? END,
-                        end_time = COALESCE(end_time, ?, ?),
-                        final_score = COALESCE(final_score, ?)
+                        end_time = COALESCE(end_time, ?, ?)
                     WHERE session_id = ?
                       AND status IN ('Active', 'Submitted', 'Completed', 'Reviewed')
                     """,
@@ -864,7 +863,6 @@ class PlatformRepository:
                         SESSION_SUBMITTED,
                         attempt.get("submitted_at"),
                         utc_now(),
-                        int(attempt.get("score") or 0),
                         attempt["session_id"],
                     ),
                 )
@@ -889,16 +887,17 @@ class PlatformRepository:
                 return {**current, "idempotent_replay": True}
             raise RuntimeError("Attempt state changed while it was submitting")
         if attempt.get("session_id"):
+            # Sessions.final_score is the session's risk score; the exam mark lives in
+            # ExamAttempts.score and must not overwrite it.
             self.db.execute(
                 """
                 UPDATE Sessions
                 SET status = CASE WHEN status = ? THEN status ELSE ? END,
-                    end_time = COALESCE(end_time, ?),
-                    final_score = ?
+                    end_time = COALESCE(end_time, ?)
                 WHERE session_id = ?
                   AND status IN ('Active', 'Submitted', 'Completed', 'Reviewed')
                 """,
-                (SESSION_REVIEWED, SESSION_SUBMITTED, submitted_at, score, attempt["session_id"]),
+                (SESSION_REVIEWED, SESSION_SUBMITTED, submitted_at, attempt["session_id"]),
             )
         submitted = self.get_attempt(attempt_id)
         return {**submitted, "idempotent_replay": False} if submitted else None
@@ -1036,6 +1035,17 @@ class PlatformRepository:
             ),
         )
         return {"evidence_id": evidence_id, "session_id": session_id, "type": evidence_type, "label": label, "filepath": filepath}
+
+    def list_session_evidence(self, session_id: str) -> list[dict]:
+        return self.db.query(
+            """
+            SELECT evidence_id, evidence_type, label, filepath, created_at
+            FROM Evidence
+            WHERE session_id = ?
+            ORDER BY created_at
+            """,
+            (session_id,),
+        )
 
     def get_settings(self, tenant_id: str | None = None) -> dict:
         tenant_id = tenant_id or DEFAULT_TENANT_ID

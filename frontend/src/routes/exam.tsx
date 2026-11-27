@@ -333,7 +333,9 @@ function useBrowserEventFallback(sessionId: string) {
       lastAwayAt = now;
       post(endpoints.tabEvent, { direction: "away" });
     };
-    const visibility = () => post(endpoints.tabEvent, { direction: document.hidden ? "away" : "back" });
+    // Leaving the tab fires both blur and visibilitychange; route "away" through the same
+    // throttle so one tab switch is scored once, not twice.
+    const visibility = () => (document.hidden ? away() : post(endpoints.tabEvent, { direction: "back" }));
     const keydown = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
       const ctrl = event.ctrlKey || event.metaKey;
