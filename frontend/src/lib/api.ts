@@ -365,19 +365,15 @@ export const api = {
   },
 
   async checkCameraStream(source: "primary" | "secondary" = "primary"): Promise<boolean> {
+    // The MJPEG feed needs a session-bound media token, so an anonymous request to it always
+    // fails before an exam starts. The proctor engine reports live camera state instead.
     if (typeof window === "undefined") return false;
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 1800);
     try {
-      const res = await fetch(`${VIDEO_BASE_URL}${endpoints.cameraStream("", source)}`, {
-        method: "GET",
-        signal: controller.signal,
-      });
-      return res.ok;
+      const status = await http<ProctorStatus>(endpoints.proctorStatus);
+      const camera = source === "primary" ? status.primary_camera : status.secondary_camera;
+      return Boolean(camera?.active);
     } catch {
       return false;
-    } finally {
-      window.clearTimeout(timeout);
     }
   },
 

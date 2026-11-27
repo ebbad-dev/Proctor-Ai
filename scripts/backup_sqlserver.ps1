@@ -2,7 +2,10 @@ param(
     [string]$Server = "localhost",
     [string]$Database = "ProctorAI_Lite",
     [string]$BackupDir = "",
-    [string]$SqlcmdPath = "sqlcmd"
+    [string]$SqlcmdPath = "sqlcmd",
+    # sqlcmd 18 rejects the self-signed certificate of a local SQL Server unless -C is passed.
+    # Use -StrictCertificate when the server presents a CA-trusted certificate.
+    [switch]$StrictCertificate
 )
 
 $ErrorActionPreference = "Stop"
@@ -44,7 +47,9 @@ WITH INIT, COMPRESSION, STATS = 10;
 
 Write-Host "Backing up SQL Server database '$Database' on '$Server' to:"
 Write-Host $backupPath
-& $SqlcmdPath -S $Server -E -b -Q $sql
+$sqlcmdArgs = @("-S", $Server, "-E", "-b")
+if (-not $StrictCertificate) { $sqlcmdArgs += "-C" }
+& $SqlcmdPath @sqlcmdArgs -Q $sql
 
 if ($LASTEXITCODE -ne 0) {
     throw "sqlcmd backup failed with exit code $LASTEXITCODE"

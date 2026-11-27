@@ -38,7 +38,7 @@ def parse_datetime(value: Any) -> datetime:
 
 def iso(value: Any) -> str:
     if isinstance(value, datetime):
-        return value.isoformat()
+        return parse_datetime(value).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     return str(value or "")
 
 

@@ -4,7 +4,10 @@ param(
     [string]$Server = "localhost",
     [string]$Database = "ProctorAI_Lite",
     [string]$SqlcmdPath = "sqlcmd",
-    [switch]$ConfirmRestore
+    [switch]$ConfirmRestore,
+    # sqlcmd 18 rejects the self-signed certificate of a local SQL Server unless -C is passed.
+    # Use -StrictCertificate when the server presents a CA-trusted certificate.
+    [switch]$StrictCertificate
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,7 +33,9 @@ ALTER DATABASE [$Database] SET MULTI_USER;
 
 Write-Host "Restoring '$Database' on '$Server' from:"
 Write-Host $fullPath
-& $SqlcmdPath -S $Server -E -b -Q $sql
+$sqlcmdArgs = @("-S", $Server, "-E", "-b")
+if (-not $StrictCertificate) { $sqlcmdArgs += "-C" }
+& $SqlcmdPath @sqlcmdArgs -Q $sql
 
 if ($LASTEXITCODE -ne 0) {
     throw "sqlcmd restore failed with exit code $LASTEXITCODE"

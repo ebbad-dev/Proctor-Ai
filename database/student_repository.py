@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from core.session_lifecycle import SESSION_REVIEWED
@@ -29,7 +29,7 @@ class StudentRepository:
         start_time: Any = None,
         status: str = "Active",
     ) -> None:
-        start_time = start_time or datetime.now()
+        start_time = start_time or datetime.now(timezone.utc)
         insert_tenant_id = tenant_id or "tenant_default"
         self.db.execute(
             """

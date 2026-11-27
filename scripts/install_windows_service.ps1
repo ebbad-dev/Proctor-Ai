@@ -1,5 +1,5 @@
 param(
-    [string]$ProjectRoot = "C:\Users\HP\OneDrive\Desktop\My Projects\Proctor AI",
+    [string]$ProjectRoot = "",
     [string]$ServiceName = "ProctorAI",
     [string]$NssmPath = "",
     [string]$NodeExe = "",
@@ -7,6 +7,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $ProjectRoot) {
+    $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+}
 
 if (-not $NssmPath) {
     $NssmPath = if ($env:NSSM_PATH) { $env:NSSM_PATH } else { "nssm" }

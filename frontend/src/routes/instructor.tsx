@@ -376,6 +376,13 @@ function ExamManagement() {
     });
   }, [selected?.id]);
 
+  // Publishing changes the status on the server; without this the form keeps the old
+  // status and a later "Save changes" would silently move the exam back to draft.
+  useEffect(() => {
+    if (!selected?.status) return;
+    setDraft((current) => ({ ...current, status: selected.status ?? current.status }));
+  }, [selected?.status]);
+
   const payload = () => ({
     title: draft.title.trim(),
     exam_code: draft.exam_code.trim(),

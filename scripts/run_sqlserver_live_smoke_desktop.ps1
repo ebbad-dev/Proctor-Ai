@@ -1,10 +1,17 @@
 param(
-    [string]$ProjectRoot = "C:\Users\HP\OneDrive\Desktop\My Projects\Proctor AI",
-    [string]$PythonExe = "C:\Users\HP\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe",
+    [string]$ProjectRoot = "",
+    [string]$PythonExe = "",
     [string]$LogPath = ""
 )
 
 $ErrorActionPreference = "Continue"
+
+if (-not $ProjectRoot) {
+    $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+}
+if (-not $PythonExe) {
+    $PythonExe = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+}
 
 if (-not $LogPath) {
     $LogPath = Join-Path $ProjectRoot "logs\sqlserver_live_smoke.log"

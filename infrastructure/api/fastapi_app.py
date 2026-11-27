@@ -1892,9 +1892,9 @@ if _FASTAPI_AVAILABLE:
         # Convert datetime to string
         for s in sessions:
             if s.get("start_time"):
-                s["start_time"] = str(s["start_time"])
+                s["start_time"] = _iso(s["start_time"])
             if s.get("end_time"):
-                s["end_time"] = str(s["end_time"])
+                s["end_time"] = _iso(s["end_time"])
             if s.get("final_score") is not None:
                 s["final_score"] = min(int(s.get("final_score") or 0), 100)
         return sessions
@@ -1916,8 +1916,8 @@ if _FASTAPI_AVAILABLE:
             if not s:
                 raise HTTPException(status_code=404, detail="Session not found")
 
-        if s.get("start_time"): s["start_time"] = str(s["start_time"])
-        if s.get("end_time"): s["end_time"] = str(s["end_time"])
+        if s.get("start_time"): s["start_time"] = _iso(s["start_time"])
+        if s.get("end_time"): s["end_time"] = _iso(s["end_time"])
         if s.get("final_score") is not None:
             s["final_score"] = min(int(s.get("final_score") or 0), 100)
 

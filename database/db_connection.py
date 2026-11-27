@@ -3,11 +3,20 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from config.settings import DB_DRIVER, DB_ENCRYPT, DB_NAME, DB_PASSWORD, DB_SERVER, DB_TRUSTED, DB_USER
 
 logger = logging.getLogger("DatabaseConnection")
+
+
+def _as_utc(value: Any) -> Any:
+    # Every DATETIME2 column is written in UTC (SYSUTCDATETIME() or aware UTC values) but
+    # comes back naive; mark it so API output carries an offset and browsers don't read it as local time.
+    if isinstance(value, datetime) and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 class DatabaseConnection:
@@ -455,7 +464,7 @@ class DatabaseConnection:
             try:
                 cursor.execute(sql, params)
                 columns = [column[0] for column in cursor.description or []]
-                return [dict(zip(columns, row)) for row in cursor.fetchall()]
+                return [dict(zip(columns, (_as_utc(value) for value in row))) for row in cursor.fetchall()]
             finally:
                 cursor.close()
 

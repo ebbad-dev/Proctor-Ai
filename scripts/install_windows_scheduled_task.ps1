@@ -1,11 +1,15 @@
 param(
-    [string]$ProjectRoot = "C:\Users\HP\OneDrive\Desktop\My Projects\Proctor AI",
+    [string]$ProjectRoot = "",
     [string]$TaskName = "ProctorAI",
     [string]$UserId = "",
     [switch]$Uninstall
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $ProjectRoot) {
+    $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+}
 
 if ($Uninstall) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
