@@ -26,6 +26,12 @@ with regression coverage and pushed only after the full local and hosted quality
 - Centralize exam-window, editability, content, grading-field privacy, and ownership rules.
 - Add deterministic concurrency tests for active-attempt start and submission replay races,
   followed by a controlled multi-process SQL Server load smoke.
+- Verify independent-process start and submit races with `npm run sql:attempt-race-smoke`;
+  the smoke must produce one active-attempt winner, one submission commit, idempotent replay
+  responses for the remaining workers, and verified cleanup of all randomized rows.
+- Run the complete authenticated exam workflow with `npm run sql:workflow-smoke`; when no
+  bootstrap administrator is configured, the harness creates an ephemeral hashed admin and
+  removes it with all other randomized workflow rows in its existing `finally` cleanup.
 
 ## Batch 3: monitoring and reporting boundaries
 

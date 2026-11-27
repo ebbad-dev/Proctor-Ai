@@ -38,6 +38,8 @@ def auth(token: str) -> dict[str, str]:
 
 def run() -> dict:
     load_env()
+    if len(os.environ.get("AUTH_SECRET", "")) < 32:
+        os.environ["AUTH_SECRET"] = secrets.token_urlsafe(48)
     for dependency_dir in (ROOT / "python_runtime_deps", ROOT / "python_user_deps"):
         if dependency_dir.exists():
             sys.path.insert(0, str(dependency_dir))
@@ -46,19 +48,34 @@ def run() -> dict:
     from fastapi.testclient import TestClient
     import infrastructure.api.fastapi_app as fastapi_app
 
+    suffix = secrets.token_hex(4)
     admin_email = os.environ.get("PROCTORAI_BOOTSTRAP_ADMIN_EMAIL", "").strip()
     admin_password = os.environ.get("PROCTORAI_BOOTSTRAP_ADMIN_PASSWORD", "")
+    seeded_admin_id = ""
     if not admin_email or not admin_password:
-        raise RuntimeError("Bootstrap admin credentials must be configured in .env for the live SQL workflow test.")
+        from core.security import hash_password
+        from database.platform_repository import PlatformRepository
 
-    suffix = secrets.token_hex(4)
+        db = fastapi_app._get_db()
+        if not db or not db.is_active:
+            raise RuntimeError("SQL Server is required for the live workflow test.")
+        admin_email = f"workflow-admin-{suffix}@qa.proctorai.local"
+        admin_password = f"Qa!9{secrets.token_urlsafe(18)}"
+        admin = PlatformRepository(db).create_user(
+            admin_email,
+            "Workflow Administrator",
+            "admin",
+            hash_password(admin_password),
+        )
+        seeded_admin_id = admin["user_id"]
+
     instructor_email = f"sarah.ahmed.{suffix}@qa.proctorai.local"
     student_email = f"amina.siddiqui.{suffix}@qa.proctorai.local"
     instructor_password = f"Qa!9{secrets.token_urlsafe(14)}"
     student_password = f"Qa!9{secrets.token_urlsafe(14)}"
     exam_code = f"CALC{suffix.upper()}"
     ids: dict[str, list[str]] = {
-        "users": [],
+        "users": [seeded_admin_id] if seeded_admin_id else [],
         "exams": [],
         "questions": [],
         "attempts": [],
@@ -256,8 +273,8 @@ def run() -> dict:
             risk = expect(client.get(f"/sessions/{session_id}/risk", headers=auth(student_token)), 200, "risk score")
             events = expect(client.get(f"/sessions/{session_id}/events", headers=auth(student_token)), 200, "event timeline")
             browser_rows = expect(client.get(f"/sessions/{session_id}/browser-activity", headers=auth(student_token)), 200, "browser activity")
-            assert risk["score"] > 0 and len(events) >= 5 and len(browser_rows) >= 5
-            checks["risk_score"] = risk["score"]
+            assert risk["risk_score"] > 0 and len(events) >= 5 and len(browser_rows) >= 5
+            checks["risk_score"] = risk["risk_score"]
 
             expect(
                 client.post(
@@ -302,9 +319,9 @@ def run() -> dict:
                 "total_marks": 1,
                 "start_time": (now + timedelta(days=1)).isoformat(),
                 "end_time": (now + timedelta(days=2)).isoformat(),
-                "status": "scheduled",
+                "status": "draft",
             }
-            future_exam = expect(client.post("/exams", headers=auth(instructor_token), json=future_payload), 200, "create scheduled exam")
+            future_exam = expect(client.post("/exams", headers=auth(instructor_token), json=future_payload), 200, "create future exam draft")
             future_exam_id = future_exam["id"]
             ids["exams"].append(future_exam_id)
             future_question = expect(
@@ -317,6 +334,15 @@ def run() -> dict:
                 "create scheduled question",
             )
             ids["questions"].append(future_question["question_id"])
+            expect(
+                client.put(
+                    f"/exams/{future_exam_id}",
+                    headers=auth(instructor_token),
+                    json={**future_payload, "status": "scheduled"},
+                ),
+                200,
+                "schedule future exam",
+            )
             expect(
                 client.post(
                     f"/exams/{future_exam_id}/assignments",

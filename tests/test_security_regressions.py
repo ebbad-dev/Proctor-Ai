@@ -459,14 +459,14 @@ class SessionLifecycleApiTests(unittest.TestCase):
             def get_attempt_responses(self, _attempt_id: str) -> list[dict]:
                 return []
 
-        with (
-            patch.object(api, "_repo", return_value=FakeRepository()),
-            patch.object(api, "_audit"),
+        with patch.object(
+            api._exam_service,
+            "repository_provider",
+            return_value=FakeRepository(),
         ):
-            result = api.submit_attempt(
+            result = api._exam_service.submit_attempt(
                 "attempt_1",
-                api.AttemptSubmitRequest(generate_report=False),
-                None,
+                False,
                 {"user_id": "student_1", "role": "student", "tenant_id": "tenant_1"},
             )
 

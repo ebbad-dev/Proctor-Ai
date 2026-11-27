@@ -18,8 +18,10 @@
     "sql:smoke": "powershell -ExecutionPolicy Bypass -File scripts/run_sqlserver_live_smoke_desktop.ps1",
     "sql:browser-smoke": ".venv\\Scripts\\python.exe scripts/browser_activity_live_smoke.py",
     "sql:identity-smoke": ".venv\\Scripts\\python.exe scripts/identity_live_smoke.py",
+    "sql:attempt-race-smoke": ".venv\\Scripts\\python.exe scripts/attempt_concurrency_live_smoke.py",
     "sql:lifecycle-smoke": ".venv\\Scripts\\python.exe scripts/lifecycle_live_smoke.py",
     "sql:api-integration": ".venv\\Scripts\\python.exe scripts/api_sql_integration_smoke.py",
+    "sql:workflow-smoke": ".venv\\Scripts\\python.exe qa_full_workflow.py",
     "sql:backup": "powershell -ExecutionPolicy Bypass -File scripts/backup_sqlserver.ps1"
   }
 }
